@@ -1,0 +1,12 @@
+<Solution>
+  <Folder Name="/Solution Items/">
+    <File Path="docs/README_CLIENTS.md" />
+    <File Path="docs/README_DEVELOPERS.md" />
+    <File Path="README.md" />
+    <File Path="CHANGELOG.md" />
+    <File Path="LICENSE" />
+  </Folder>
+  <Project Path="src/PDFConverter.Tests/PDFConverter.Tests.csproj" />
+  <Project Path="src/PDFConverter/PDFConverter.csproj" />
+  <Project Path="src/TestConsole/TestConsole.csproj" Id="9b620dfa-9091-4560-bd9d-d7eb64e4105b" />
+</Solution>

@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="PDFConverter.csproj" />
+  <Project Path="..\PDFConverter.Tests\PDFConverter.Tests.csproj" />
+</Solution>
