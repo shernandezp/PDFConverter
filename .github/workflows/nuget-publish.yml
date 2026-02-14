@@ -17,16 +17,16 @@ jobs:
         dotnet-version: '10.0.x'
 
     - name: Restore
-      run: dotnet restore
+      run: dotnet restore src\PDFConverter\PDFConverter.csproj
 
     - name: Build
-      run: dotnet build -c Release --no-restore
+      run: dotnet build src\PDFConverter\PDFConverter.csproj -c Release --no-restore
 
     - name: Pack
-      run: dotnet pack -c Release -o ./nupkg
+      run: dotnet pack src\PDFConverter\PDFConverter.csproj -c Release --no-build -o nupkg
 
     - name: Publish to NuGet
       env:
         NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
       run: |
-        dotnet nuget push ./nupkg/*.nupkg --api-key $env:NUGET_API_KEY --source "https://api.nuget.org/v3/index.json"
+        dotnet nuget push nupkg\*.nupkg --api-key $env:NUGET_API_KEY --source "https://api.nuget.org/v3/index.json"
