@@ -25,9 +25,4 @@ jobs:
       run: dotnet build --configuration Release --no-restore
 
     - name: Run tests
-      run: |
-        if dotnet test --no-restore --verbosity minimal; then
-          echo "Tests passed";
-        else
-          echo "Tests failed"; exit 1;
-        fi
+      run: dotnet test --no-restore --verbosity minimal
