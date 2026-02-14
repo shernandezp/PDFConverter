@@ -22,7 +22,7 @@ All notable changes to this project will be documented in this file.
 - Hyperlink rendering in tables (WordprocessingML and DrawingML)
 - MigraDoc border extension detection algorithm for XLSX merged cells
 - Centering simulation without MergeRight via LeftIndent for border-extension merges
-- 139 unit and integration tests
+- 138 unit and integration tests (all in-memory, no file dependencies)
 
 ### Fixed
 - Style paragraph/run property resolution (OpenXML 3.x type cast issue)
