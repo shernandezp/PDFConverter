@@ -6,7 +6,7 @@
     <Nullable>enable</Nullable>
 
     <!-- Package metadata for NuGet -->
-    <PackageId>PDFConverter</PackageId>
+    <PackageId>DocxXlsx.PDFConverter</PackageId>
     <Version>0.0.1</Version>
     <Authors>shernandezp</Authors>
     <Company>shernandezp</Company>
