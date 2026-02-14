@@ -36,7 +36,7 @@ public class DocxConverterIntegrationTests : IDisposable
     private static int GetPdfPageCount(string pdfPath)
     {
         // PdfSharp can read page count
-        using var pdf = PdfSharp.Pdf.IO.PdfReader.Open(pdfPath, PdfSharp.Pdf.IO.PdfDocumentOpenMode.InformationOnly);
+        using var pdf = PdfSharp.Pdf.IO.PdfReader.Open(pdfPath, PdfSharp.Pdf.IO.PdfDocumentOpenMode.Import);
         return pdf.PageCount;
     }
 
