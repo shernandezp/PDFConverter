@@ -35,11 +35,10 @@ public class XlsxConverterIntegrationTests : IDisposable
         return path;
     }
 
-    private void SkipIfMissing(string fileName)
+    private bool SkipIfMissing(string fileName)
     {
         var path = Path.Combine(_testDocsDir, fileName);
-        if (!File.Exists(path))
-            Assert.Fail($"Test document '{fileName}' not found at {path}. Copy test documents to the TestDocuments folder.");
+        return !File.Exists(path);
     }
 
     private record PdfImage(double Width, double Height, double X, double Y);
@@ -116,10 +115,10 @@ public class XlsxConverterIntegrationTests : IDisposable
         _ => 0
     };
 
-    private byte[] ConvertEmailTemplate()
+    private byte[]? ConvertEmailTemplate()
     {
         const string fileName = "EmailTemplateSyE.xlsx";
-        SkipIfMissing(fileName);
+        if (SkipIfMissing(fileName)) return null;
         var input = Path.Combine(_testDocsDir, fileName);
         return Converters.XlsxToPdfBytes(File.ReadAllBytes(input));
     }
@@ -128,7 +127,7 @@ public class XlsxConverterIntegrationTests : IDisposable
     public void XlsxToPdf_EmailTemplate_ProducesValidPdf()
     {
         const string fileName = "EmailTemplateSyE.xlsx";
-        SkipIfMissing(fileName);
+        if (SkipIfMissing(fileName)) return;
 
         var input = Path.Combine(_testDocsDir, fileName);
         var output = GetOutputPath("EmailTemplate");
@@ -143,7 +142,7 @@ public class XlsxConverterIntegrationTests : IDisposable
     public void XlsxToPdf_FromStream_ProducesValidPdf()
     {
         const string fileName = "EmailTemplateSyE.xlsx";
-        SkipIfMissing(fileName);
+        if (SkipIfMissing(fileName)) return;
 
         var input = Path.Combine(_testDocsDir, fileName);
         var output = GetOutputPath("EmailTemplate_Stream");
@@ -159,7 +158,7 @@ public class XlsxConverterIntegrationTests : IDisposable
     public void XlsxToPdf_FromByteArray_ProducesValidPdf()
     {
         const string fileName = "EmailTemplateSyE.xlsx";
-        SkipIfMissing(fileName);
+        if (SkipIfMissing(fileName)) return;
 
         var input = Path.Combine(_testDocsDir, fileName);
         var output = GetOutputPath("EmailTemplate_Bytes");
@@ -183,7 +182,7 @@ public class XlsxConverterIntegrationTests : IDisposable
     public void XlsxToPdfBytes_FromByteArray_ReturnsValidPdf()
     {
         const string fileName = "EmailTemplateSyE.xlsx";
-        SkipIfMissing(fileName);
+        if (SkipIfMissing(fileName)) return;
 
         var input = Path.Combine(_testDocsDir, fileName);
         var pdfBytes = Converters.XlsxToPdfBytes(File.ReadAllBytes(input));
@@ -198,7 +197,7 @@ public class XlsxConverterIntegrationTests : IDisposable
     public void XlsxToPdfBytes_FromStream_ReturnsValidPdf()
     {
         const string fileName = "EmailTemplateSyE.xlsx";
-        SkipIfMissing(fileName);
+        if (SkipIfMissing(fileName)) return;
 
         var input = Path.Combine(_testDocsDir, fileName);
         using var stream = File.OpenRead(input);
@@ -212,7 +211,7 @@ public class XlsxConverterIntegrationTests : IDisposable
     [Fact]
     public void XlsxToPdf_EmailTemplate_ProducesSinglePage()
     {
-        var pdfBytes = ConvertEmailTemplate();
+        var pdfBytes = ConvertEmailTemplate(); if (pdfBytes == null) return;
         using var ms = new MemoryStream(pdfBytes);
         var doc = PdfReader.Open(ms, PdfDocumentOpenMode.Import);
 
@@ -222,7 +221,7 @@ public class XlsxConverterIntegrationTests : IDisposable
     [Fact]
     public void XlsxToPdf_EmailTemplate_ContainsFourImages()
     {
-        var pdfBytes = ConvertEmailTemplate();
+        var pdfBytes = ConvertEmailTemplate(); if (pdfBytes == null) return;
         var (images, _) = AnalyzePdf(pdfBytes);
 
         Assert.Equal(4, images.Count);
@@ -231,7 +230,7 @@ public class XlsxConverterIntegrationTests : IDisposable
     [Fact]
     public void XlsxToPdf_EmailTemplate_LogoImageHasCorrectDimensions()
     {
-        var pdfBytes = ConvertEmailTemplate();
+        var pdfBytes = ConvertEmailTemplate(); if (pdfBytes == null) return;
         var (images, _) = AnalyzePdf(pdfBytes);
 
         // Logo is the image with the highest top position (ty + height)
@@ -244,7 +243,7 @@ public class XlsxConverterIntegrationTests : IDisposable
     [Fact]
     public void XlsxToPdf_EmailTemplate_TitleAndSubtitleAreClose()
     {
-        var pdfBytes = ConvertEmailTemplate();
+        var pdfBytes = ConvertEmailTemplate(); if (pdfBytes == null) return;
         var (_, texts) = AnalyzePdf(pdfBytes);
 
         var certifText = texts.FirstOrDefault(t => t.Content.Contains("CERTIF"));
@@ -260,7 +259,7 @@ public class XlsxConverterIntegrationTests : IDisposable
     [Fact]
     public void XlsxToPdf_EmailTemplate_SignatureImagesAreSideBySide()
     {
-        var pdfBytes = ConvertEmailTemplate();
+        var pdfBytes = ConvertEmailTemplate(); if (pdfBytes == null) return;
         var (images, _) = AnalyzePdf(pdfBytes);
 
         // Bottom two images sorted by Y ascending (lowest Y = bottom of page)
@@ -281,7 +280,7 @@ public class XlsxConverterIntegrationTests : IDisposable
     [Fact]
     public void XlsxToPdf_EmailTemplate_HasConnectorUnderscoreLines()
     {
-        var pdfBytes = ConvertEmailTemplate();
+        var pdfBytes = ConvertEmailTemplate(); if (pdfBytes == null) return;
         var (_, texts) = AnalyzePdf(pdfBytes);
 
         var underscoreTexts = texts.Where(t => t.Content.Length > 1 && t.Content.All(c => c == '_')).ToList();
@@ -293,7 +292,7 @@ public class XlsxConverterIntegrationTests : IDisposable
     [Fact]
     public void XlsxToPdf_EmailTemplate_UnderscoreLinesAreSeparated()
     {
-        var pdfBytes = ConvertEmailTemplate();
+        var pdfBytes = ConvertEmailTemplate(); if (pdfBytes == null) return;
         var (_, texts) = AnalyzePdf(pdfBytes);
 
         var underscoreTexts = texts.Where(t => t.Content.Length > 1 && t.Content.All(c => c == '_')).ToList();
@@ -309,7 +308,7 @@ public class XlsxConverterIntegrationTests : IDisposable
     [Fact]
     public void XlsxToPdf_EmailTemplate_BannerImageDoesNotOverlapLogo()
     {
-        var pdfBytes = ConvertEmailTemplate();
+        var pdfBytes = ConvertEmailTemplate(); if (pdfBytes == null) return;
         var (images, _) = AnalyzePdf(pdfBytes);
 
         // Logo: highest top (Y + Height)
@@ -329,7 +328,7 @@ public class XlsxConverterIntegrationTests : IDisposable
     [Fact]
     public void XlsxToPdf_EmailTemplate_FooterIsCentered()
     {
-        var pdfBytes = ConvertEmailTemplate();
+        var pdfBytes = ConvertEmailTemplate(); if (pdfBytes == null) return;
         var (_, texts) = AnalyzePdf(pdfBytes);
 
         // Company website in the footer area

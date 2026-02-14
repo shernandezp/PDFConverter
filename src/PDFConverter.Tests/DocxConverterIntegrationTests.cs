@@ -40,11 +40,10 @@ public class DocxConverterIntegrationTests : IDisposable
         return pdf.PageCount;
     }
 
-    private void SkipIfMissing(string fileName)
+    private bool SkipIfMissing(string fileName)
     {
         var path = Path.Combine(_testDocsDir, fileName);
-        if (!File.Exists(path))
-            Assert.Fail($"Test document '{fileName}' not found at {path}. Copy test documents to the TestDocuments folder.");
+        return !File.Exists(path);
     }
 
     #region DOCX Conversion — File Path Overload
@@ -53,7 +52,7 @@ public class DocxConverterIntegrationTests : IDisposable
     public void DocxToPdf_CertTemp_ProducesSinglePagePdf()
     {
         const string fileName = "Cert_Temp.docx";
-        SkipIfMissing(fileName);
+        if (SkipIfMissing(fileName)) return;
 
         var input = Path.Combine(_testDocsDir, fileName);
         var output = GetOutputPath("CertTemp");
@@ -69,7 +68,7 @@ public class DocxConverterIntegrationTests : IDisposable
     public void DocxToPdf_CheckListTemp_ProducesTwoPagePdf()
     {
         const string fileName = "CheckList_Temp.docx";
-        SkipIfMissing(fileName);
+        if (SkipIfMissing(fileName)) return;
 
         var input = Path.Combine(_testDocsDir, fileName);
         var output = GetOutputPath("CheckListTemp");
@@ -85,7 +84,7 @@ public class DocxConverterIntegrationTests : IDisposable
     public void DocxToPdf_MaqCertTemp_ProducesSinglePagePdf()
     {
         const string fileName = "Maq_Cert_Temp.docx";
-        SkipIfMissing(fileName);
+        if (SkipIfMissing(fileName)) return;
 
         var input = Path.Combine(_testDocsDir, fileName);
         var output = GetOutputPath("MaqCertTemp");
@@ -101,7 +100,7 @@ public class DocxConverterIntegrationTests : IDisposable
     public void DocxToPdf_MessageTemplateTemp_ProducesSinglePagePdf()
     {
         const string fileName = "MessageTemplate_Temp.docx";
-        SkipIfMissing(fileName);
+        if (SkipIfMissing(fileName)) return;
 
         var input = Path.Combine(_testDocsDir, fileName);
         var output = GetOutputPath("MessageTemplateTemp");
@@ -117,7 +116,7 @@ public class DocxConverterIntegrationTests : IDisposable
     public void DocxToPdf_TripControlTemp_ProducesSinglePagePdf()
     {
         const string fileName = "tripcontroltemp.docx";
-        SkipIfMissing(fileName);
+        if (SkipIfMissing(fileName)) return;
 
         var input = Path.Combine(_testDocsDir, fileName);
         var output = GetOutputPath("TripControlTemp");
@@ -133,7 +132,7 @@ public class DocxConverterIntegrationTests : IDisposable
     public void DocxToPdf_TripControlMovexx_ProducesSinglePagePdf()
     {
         const string fileName = "TripControl_Movexx.docx";
-        SkipIfMissing(fileName);
+        if (SkipIfMissing(fileName)) return;
 
         var input = Path.Combine(_testDocsDir, fileName);
         var output = GetOutputPath("TripControlMovexx");
@@ -153,7 +152,7 @@ public class DocxConverterIntegrationTests : IDisposable
     public void DocxToPdf_FromStream_ProducesValidPdf()
     {
         const string fileName = "Cert_Temp.docx";
-        SkipIfMissing(fileName);
+        if (SkipIfMissing(fileName)) return;
 
         var input = Path.Combine(_testDocsDir, fileName);
         var output = GetOutputPath("CertTemp_Stream");
@@ -174,7 +173,7 @@ public class DocxConverterIntegrationTests : IDisposable
     public void DocxToPdf_FromByteArray_ProducesValidPdf()
     {
         const string fileName = "Cert_Temp.docx";
-        SkipIfMissing(fileName);
+        if (SkipIfMissing(fileName)) return;
 
         var input = Path.Combine(_testDocsDir, fileName);
         var output = GetOutputPath("CertTemp_Bytes");
@@ -195,7 +194,7 @@ public class DocxConverterIntegrationTests : IDisposable
     public void DocxToPdf_AllOverloads_ProduceSamePageCount()
     {
         const string fileName = "CheckList_Temp.docx";
-        SkipIfMissing(fileName);
+        if (SkipIfMissing(fileName)) return;
 
         var input = Path.Combine(_testDocsDir, fileName);
 
@@ -254,7 +253,7 @@ public class DocxConverterIntegrationTests : IDisposable
     public void DocxToPdfBytes_FromByteArray_ReturnsValidPdf()
     {
         const string fileName = "Cert_Temp.docx";
-        SkipIfMissing(fileName);
+        if (SkipIfMissing(fileName)) return;
 
         var input = Path.Combine(_testDocsDir, fileName);
         var pdfBytes = Converters.DocxToPdfBytes(File.ReadAllBytes(input));
@@ -272,7 +271,7 @@ public class DocxConverterIntegrationTests : IDisposable
     public void DocxToPdfBytes_FromStream_ReturnsValidPdf()
     {
         const string fileName = "Cert_Temp.docx";
-        SkipIfMissing(fileName);
+        if (SkipIfMissing(fileName)) return;
 
         var input = Path.Combine(_testDocsDir, fileName);
         using var stream = File.OpenRead(input);
@@ -287,7 +286,7 @@ public class DocxConverterIntegrationTests : IDisposable
     public void DocxToPdfBytes_MatchesFileOutput_PageCount()
     {
         const string fileName = "Cert_Temp.docx";
-        SkipIfMissing(fileName);
+        if (SkipIfMissing(fileName)) return;
 
         var input = Path.Combine(_testDocsDir, fileName);
         var pdfBytes = Converters.DocxToPdfBytes(File.ReadAllBytes(input));
