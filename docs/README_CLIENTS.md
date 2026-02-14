@@ -5,10 +5,10 @@ Complete guide for integrating PDFConverter into your application.
 ## Installation
 
 ```bash
-dotnet add package PDFConverter
+dotnet add package DocxXlsx.PDFConverter
 ```
 
-Or via the NuGet Package Manager in Visual Studio, search for **PDFConverter**.
+Or via the NuGet Package Manager in Visual Studio, search for **DocxXlsx.PDFConverter**.
 
 ## API Reference
 

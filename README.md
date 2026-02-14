@@ -1,7 +1,7 @@
 # PDFConverter
 
 [![CI Build](https://github.com/shernandezp/PDFConverter/actions/workflows/ci-build.yml/badge.svg)](https://github.com/shernandezp/PDFConverter/actions/workflows/ci-build.yml)
-[![NuGet](https://img.shields.io/nuget/v/PDFConverter.svg)](https://www.nuget.org/packages/PDFConverter/)
+[![NuGet](https://img.shields.io/nuget/v/DocxXlsx.PDFConverter.svg)](https://www.nuget.org/packages/DocxXlsx.PDFConverter/)
 
 A lightweight, free and open-source .NET library that converts **DOCX** and **XLSX** files to **PDF** using [OpenXML SDK](https://github.com/dotnet/Open-XML-SDK) and [PdfSharp/MigraDoc](https://github.com/empira/PDFsharp). No Microsoft Office installation required.
 
@@ -23,7 +23,7 @@ This project was built with significant help from [GitHub Copilot](https://githu
 ## Installation
 
 ```bash
-dotnet add package PDFConverter
+dotnet add package DocxXlsx.PDFConverter
 ```
 
 ## Quick Start
