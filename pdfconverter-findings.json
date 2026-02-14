@@ -20,7 +20,7 @@
       "RunFormat.cs": "Sealed record: FontFamily, Color, Bold, Italic, Underline, Size — with ApplyTo(FormattedText)",
       "BorderInfo.cs": "Sealed record: Top/Bottom/Left/Right width+color+style + padding, with Empty singleton"
     },
-    "testProject": "src/PDFConverter.Tests/ — 139 xUnit tests (unit + integration)"
+    "testProject": "src/PDFConverter.Tests/ — 138 xUnit tests (unit + integration, all in-memory)"
   },
 
   "packages": {
@@ -604,7 +604,7 @@
     ],
     "automatedValidation": {
       "tool": "xUnit 2.9.3 with Microsoft.NET.Test.Sdk",
-      "totalTests": 139,
+      "totalTests": 138,
       "integrationTests": "Convert each test document via all 3 input overloads (file, stream, byte[]) + byte[] return overloads. Validate: no exceptions thrown, output file exists and is non-empty, PDF page count matches expected value, PDF header bytes are %PDF.",
       "unitTests": "Test individual parsing methods with in-memory OpenXML documents. Validate: style resolution chain, paragraph formatting extraction, run formatting extraction, border parsing, emoji detection, image format detection, Roman numeral conversion, conditional formatting detection.",
       "pageCountValidation": "PdfSharp.Pdf.IO.PdfReader.Open(path, PdfDocumentOpenMode.Import).PageCount",

@@ -24,7 +24,7 @@ PDFConverter/
 |   |   +-- Fonts/                 # Embedded NotoEmoji-Regular.ttf
 |   |   +-- TestDocuments/         # Sample DOCX/XLSX files for testing
 |   |   +-- pdfconverter-findings.json  # Detailed findings and gotchas
-|   +-- PDFConverter.Tests/        # xUnit test project (139 tests)
+|   +-- PDFConverter.Tests/        # xUnit test project (138 tests)
 |   +-- TestConsole/               # Console app for manual testing
 +-- docs/
 |   +-- README_CLIENTS.md          # Client/consumer documentation
@@ -85,18 +85,17 @@ dotnet pack -c Release
 
 ## Testing
 
-The test project (`PDFConverter.Tests`) contains 139 tests:
+The test project (`PDFConverter.Tests`) contains 138 tests:
 
 - **Unit tests**: Test individual methods with in-memory OpenXML documents (WordHelpers, ConverterExtensions, RunFormat, ParagraphFormat, BorderInfo)
-- **Integration tests**: Convert real test documents to PDF and validate page counts, file sizes, and PDF header bytes
+- **Integration tests**: Convert in-memory OpenXML documents to PDF and validate output (page counts, text content, images, borders)
+- All tests are self-contained — no external file dependencies
 
 ```bash
 dotnet test --verbosity normal
 ```
 
-### Test Documents
-
-Test documents are stored in `src/PDFConverter/TestDocuments/`. Integration tests locate them via relative path from the test assembly output directory.
+> **Note**: All test documents are constructed programmatically in memory. No confidential or sample files are required.
 
 ## Known OpenXML Gotchas
 
