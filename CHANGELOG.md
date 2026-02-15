@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.3] - 2026-02-15
+
+### Fixed
+- DOCX: Images with DrawingML hyperlinks (`a:hlinkClick` in `wp:docPr`) now produce clickable PDF link annotations via post-render overlay
+
 ## [0.0.2] - 2026-02-15
 
 ### Fixed
