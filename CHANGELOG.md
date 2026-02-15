@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 ## [0.0.2] - 2026-02-15
 
 ### Fixed
-- DOCX: Footer distance (`pgMar.Footer`) was not read from section properties, causing tables near the bottom of the page to overlap the footer in the PDF output (e.g., CheckList_Temp.docx)
+- DOCX: Footer distance (`pgMar.Footer`) was not read from section properties, causing tables near the bottom of the page to overlap the footer in the PDF output
 
 ## [0.0.1] - 2026-02-14
 
