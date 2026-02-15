@@ -40,4 +40,7 @@ bld/
 ## Session state
 .copilot/
 
+## Copilot instructions (local only)
+.github/copilot-instructions.md
+
 pdfconverter-findings.json
