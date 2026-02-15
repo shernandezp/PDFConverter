@@ -204,6 +204,36 @@ public class DocxConverterIntegrationTests : IDisposable
 
     #endregion
 
+    #region Footer Distance
+
+    /// <summary>
+    /// A DOCX with a table and a footer should not overlap — the footer text
+    /// must appear below the table content when footer distance is set.
+    /// </summary>
+    [Fact]
+    public void DocxToPdf_TableWithFooter_FooterBelowTable()
+    {
+        var docx = BuildTableWithFooterDocx();
+        var pdfBytes = Converters.DocxToPdfBytes(docx);
+
+        AssertValidPdf(pdfBytes);
+        var texts = ExtractTexts(pdfBytes);
+
+        // Table content and footer text should both be present
+        Assert.Contains(texts, t => t.Content.Contains("Cell"));
+        Assert.Contains(texts, t => t.Content.Contains("FooterText"));
+
+        // Footer text should have a lower Y coordinate than any table cell text
+        // (PDF Y axis: 0 = bottom of page, higher = further up)
+        var footerY = texts.Where(t => t.Content.Contains("FooterText")).Min(t => t.Y);
+        var tableMinY = texts.Where(t => t.Content.Contains("Cell")).Min(t => t.Y);
+
+        Assert.True(footerY < tableMinY,
+            $"Footer (Y={footerY:F1}) should be below table content (min Y={tableMinY:F1})");
+    }
+
+    #endregion
+
     #region All Overloads
 
     /// <summary>
@@ -474,6 +504,65 @@ public class DocxConverterIntegrationTests : IDisposable
                     new W.Paragraph(
                         new W.Run(new W.Text("Landscape document"))),
                     sectPr));
+        }
+        return ms.ToArray();
+    }
+
+    /// <summary>
+    /// Builds a DOCX with a 5×3 table and a footer paragraph, with explicit footer distance.
+    /// </summary>
+    private static byte[] BuildTableWithFooterDocx()
+    {
+        using var ms = new MemoryStream();
+        using (var doc = WordprocessingDocument.Create(ms, WordprocessingDocumentType.Document))
+        {
+            var mainPart = doc.AddMainDocumentPart();
+
+            // Create footer part
+            var footerPart = mainPart.AddNewPart<FooterPart>();
+            footerPart.Footer = new Footer(
+                new W.Paragraph(
+                    new W.Run(new W.Text("FooterText Here"))));
+
+            var footerRefId = mainPart.GetIdOfPart(footerPart);
+
+            var table = new W.Table();
+            var tblPr = new W.TableProperties(
+                new W.TableBorders(
+                    new W.TopBorder { Val = BorderValues.Single, Size = 4 },
+                    new W.BottomBorder { Val = BorderValues.Single, Size = 4 },
+                    new W.LeftBorder { Val = BorderValues.Single, Size = 4 },
+                    new W.RightBorder { Val = BorderValues.Single, Size = 4 },
+                    new W.InsideHorizontalBorder { Val = BorderValues.Single, Size = 4 },
+                    new W.InsideVerticalBorder { Val = BorderValues.Single, Size = 4 }));
+            table.Append(tblPr);
+
+            for (int r = 1; r <= 5; r++)
+            {
+                var row = new W.TableRow();
+                for (int c = 1; c <= 3; c++)
+                    row.Append(new W.TableCell(
+                        new W.Paragraph(new W.Run(new W.Text($"Cell R{r}C{c}")))));
+                table.Append(row);
+            }
+
+            // Section properties with footer reference and explicit footer margin
+            var sectPr = new W.SectionProperties(
+                new W.FooterReference
+                {
+                    Type = HeaderFooterValues.Default,
+                    Id = footerRefId
+                },
+                new W.PageSize { Width = 12240, Height = 15840 },
+                new W.PageMargin
+                {
+                    Top = 1440, Bottom = 1440,
+                    Left = 1440, Right = 1440,
+                    Footer = 720 // 0.5 inch footer distance
+                });
+
+            mainPart.Document = new Document(
+                new Body(table, sectPr));
         }
         return ms.ToArray();
     }

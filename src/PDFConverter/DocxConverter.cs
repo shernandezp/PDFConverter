@@ -173,7 +173,12 @@ public static class DocxConverter
                 {
                     section.PageSetup.HeaderDistance = Unit.FromPoint(pgMar.Header.Value / 20.0);
                 }
-                OpenXmlHelpers.ImageLoadLogger?.Invoke($"Applied margins: top={section.PageSetup.TopMargin.Point}pt headerDistance={section.PageSetup.HeaderDistance.Point}pt");
+                // Footer distance
+                if (pgMar.Footer != null && pgMar.Footer.HasValue)
+                {
+                    section.PageSetup.FooterDistance = Unit.FromPoint(pgMar.Footer.Value / 20.0);
+                }
+                OpenXmlHelpers.ImageLoadLogger?.Invoke($"Applied margins: top={section.PageSetup.TopMargin.Point}pt bottom={section.PageSetup.BottomMargin.Point}pt headerDistance={section.PageSetup.HeaderDistance.Point}pt footerDistance={section.PageSetup.FooterDistance.Point}pt");
             }
         }
         catch { }
@@ -902,7 +907,7 @@ public static class DocxConverter
             {
                 var pdf = renderer.PdfDocument;
                 OpenXmlHelpers.ImageLoadLogger?.Invoke($"Drawing {backgroundFiles.Count} background files onto PDF pages");
-                OpenXmlHelpers.ImageLoadLogger?.Invoke($"Final HeaderDistance={section.PageSetup.HeaderDistance.Point}pt TopMargin={section.PageSetup.TopMargin.Point} BottomMargin={section.PageSetup.BottomMargin.Point}");
+                OpenXmlHelpers.ImageLoadLogger?.Invoke($"Final HeaderDistance={section.PageSetup.HeaderDistance.Point}pt FooterDistance={section.PageSetup.FooterDistance.Point}pt TopMargin={section.PageSetup.TopMargin.Point} BottomMargin={section.PageSetup.BottomMargin.Point}");
                 foreach (var page in pdf.Pages)
                 {
                     using var gfx = XGraphics.FromPdfPage(page, XGraphicsPdfPageOptions.Prepend);
