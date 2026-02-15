@@ -39,3 +39,5 @@ bld/
 
 ## Session state
 .copilot/
+
+pdfconverter-findings.json
