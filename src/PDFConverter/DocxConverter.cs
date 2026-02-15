@@ -821,7 +821,7 @@ public static class DocxConverter
                     }
                     else if (child is W.Hyperlink hyperlink)
                     {
-                        addedText |= ProcessHyperlink(word.MainDocumentPart, hyperlink, p, para, usedFonts);
+                        addedText |= ProcessHyperlink(word, hyperlink, p, para, usedFonts, tempFiles);
                     }
                 }
 
@@ -985,9 +985,11 @@ public static class DocxConverter
     /// <summary>
     /// Process a hyperlink element and add it to the paragraph
     /// </summary>
-    private static bool ProcessHyperlink(MainDocumentPart mainPart, W.Hyperlink hyperlink, 
-        W.Paragraph p, MigraDoc.DocumentObjectModel.Paragraph para, HashSet<string> usedFonts)
+    private static bool ProcessHyperlink(WordprocessingDocument doc, W.Hyperlink hyperlink, 
+        W.Paragraph p, MigraDoc.DocumentObjectModel.Paragraph para, HashSet<string> usedFonts,
+        List<string> tempFiles)
     {
+        var mainPart = doc.MainDocumentPart!;
         string? url = null;
 
         var relId = hyperlink.Id?.Value;
@@ -1009,6 +1011,47 @@ public static class DocxConverter
 
         foreach (var run in hyperlink.Elements<W.Run>())
         {
+            // Handle images inside hyperlinks
+            var drawing = run.GetFirstChild<W.Drawing>();
+            if (drawing != null)
+            {
+                try
+                {
+                    var runInfos = ConverterExtensions.GetImageInfosFromParagraph(doc,
+                        new W.Paragraph(run.CloneNode(true))).ToList();
+                    foreach (var info in runInfos)
+                    {
+                        if (info.Bytes == null || info.Bytes.Length == 0) continue;
+                        var imgBytes = ConverterExtensions.ApplySrcRectCrop(
+                            info.Bytes, info.CropLeft, info.CropTop, info.CropRight, info.CropBottom);
+                        var imgPath = ConverterExtensions.SaveTempImage(imgBytes);
+                        tempFiles.Add(imgPath);
+                        if (!string.IsNullOrEmpty(url))
+                        {
+                            var link = para.AddHyperlink(url, HyperlinkType.Web);
+                            var image = link.AddImage(imgPath);
+                            image.LockAspectRatio = true;
+                            if (info.ExtentCxEmu.HasValue)
+                                image.Width = Unit.FromPoint(info.ExtentCxEmu.Value / 12700.0);
+                            else
+                                image.Width = Unit.FromCentimeter(4);
+                        }
+                        else
+                        {
+                            var image = para.AddImage(imgPath);
+                            image.LockAspectRatio = true;
+                            if (info.ExtentCxEmu.HasValue)
+                                image.Width = Unit.FromPoint(info.ExtentCxEmu.Value / 12700.0);
+                            else
+                                image.Width = Unit.FromCentimeter(4);
+                        }
+                        addedText = true;
+                    }
+                }
+                catch { }
+                continue;
+            }
+
             var fmt = OpenXmlHelpers.ResolveRunFormatting(mainPart, run, p);
             if (!string.IsNullOrEmpty(fmt.FontFamily)) usedFonts.Add(fmt.FontFamily);
 
