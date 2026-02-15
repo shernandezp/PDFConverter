@@ -201,6 +201,8 @@ public static class DocxConverter
         // collect temp files to delete after rendering
         tempFiles = new List<string>();
         var backgroundFiles = new List<string>();
+        // collect hyperlinked images for post-render link annotation overlay
+        var hyperlinkImages = new List<(string Url, string ImagePath, double WidthPt, double HeightPt)>();
 
         // Render header images (if any) at top of the first section so header graphics are preserved
         try
@@ -594,14 +596,22 @@ public static class DocxConverter
                                 var imgPara = section.AddParagraph();
                                 var image = imgPara.AddImage(imgPath);
                                 image.LockAspectRatio = true;
+                                double imgWidthPt;
+                                double imgHeightPt = info.ExtentCyEmu.HasValue ? EmuToPoints(info.ExtentCyEmu.Value) : 113.4;
                                 if (info.ExtentCxEmu.HasValue)
                                 {
-                                    image.Width = Unit.FromPoint(EmuToPoints(info.ExtentCxEmu.Value));
+                                    imgWidthPt = EmuToPoints(info.ExtentCxEmu.Value);
+                                    image.Width = Unit.FromPoint(imgWidthPt);
                                 }
                                 else
                                 {
+                                    imgWidthPt = Unit.FromCentimeter(16).Point;
                                     image.Width = Unit.FromCentimeter(16);
                                 }
+
+                                // Collect for post-render link annotation
+                                if (!string.IsNullOrEmpty(info.HyperlinkUrl))
+                                    hyperlinkImages.Add((info.HyperlinkUrl, imgPath, imgWidthPt, imgHeightPt));
 
                                 // If image is anchored, prefer left alignment to match Word anchored placement
                                 if (info.IsAnchor)
@@ -807,11 +817,13 @@ public static class DocxConverter
                                     tempFiles.Add(imgPath);
                                     var image = para.AddImage(imgPath);
                                     image.LockAspectRatio = true;
-                                    if (info.ExtentCxEmu.HasValue)
-                                        image.Width = Unit.FromPoint(EmuToPoints(info.ExtentCxEmu.Value));
-                                    else
-                                        image.Width = Unit.FromCentimeter(4);
+                                    double imgWidthPt = info.ExtentCxEmu.HasValue ? EmuToPoints(info.ExtentCxEmu.Value) : 113.4;
+                                    double imgHeightPt = info.ExtentCyEmu.HasValue ? EmuToPoints(info.ExtentCyEmu.Value) : 113.4;
+                                    image.Width = Unit.FromPoint(imgWidthPt);
                                     addedText = true;
+                                    // Collect for post-render link annotation
+                                    if (!string.IsNullOrEmpty(info.HyperlinkUrl))
+                                        hyperlinkImages.Add((info.HyperlinkUrl, imgPath, imgWidthPt, imgHeightPt));
                                 }
                             }
                             catch { }
@@ -821,7 +833,7 @@ public static class DocxConverter
                     }
                     else if (child is W.Hyperlink hyperlink)
                     {
-                        addedText |= ProcessHyperlink(word, hyperlink, p, para, usedFonts, tempFiles);
+                        addedText |= ProcessHyperlink(word, hyperlink, p, para, usedFonts, tempFiles, hyperlinkImages);
                     }
                 }
 
@@ -932,8 +944,107 @@ public static class DocxConverter
             OpenXmlHelpers.ImageLoadLogger?.Invoke($"Background drawing failed: {ex.Message}");
         }
 
+        // Add clickable link annotations for hyperlinked images
+        try
+        {
+            OpenXmlHelpers.ImageLoadLogger?.Invoke($"Hyperlinked images collected: {hyperlinkImages.Count}");
+            if (hyperlinkImages.Count > 0)
+            {
+                var pdf = renderer.PdfDocument;
+                foreach (var page in pdf.Pages)
+                {
+                    AddImageHyperlinkAnnotations(page, hyperlinkImages);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            OpenXmlHelpers.ImageLoadLogger?.Invoke($"Hyperlink annotation failed: {ex.Message}");
+        }
+
         return renderer;
     }
+
+    /// <summary>
+    /// Scans a PDF page's content stream for image placements and adds web link annotations
+    /// for images that match collected hyperlinked image info.
+    /// </summary>
+    private static void AddImageHyperlinkAnnotations(PdfSharp.Pdf.PdfPage page,
+        List<(string Url, string ImagePath, double WidthPt, double HeightPt)> hyperlinkImages)
+    {
+        try
+        {
+            var content = PdfSharp.Pdf.Content.ContentReader.ReadContent(page);
+            var usedImages = new HashSet<int>();
+            // Walk the content stream looking for image placements (cm + Do pattern)
+            // The cm operator sets CTM: a b c d e f where the image is drawn at (e,f) with size (a,d)
+            double lastA = 0, lastD = 0, lastE = 0, lastF = 0;
+            bool hasCm = false;
+
+            WalkContentForImages(content, page, hyperlinkImages, usedImages, ref lastA, ref lastD, ref lastE, ref lastF, ref hasCm);
+        }
+        catch { }
+    }
+
+    private static void WalkContentForImages(PdfSharp.Pdf.Content.Objects.CSequence seq,
+        PdfSharp.Pdf.PdfPage page,
+        List<(string Url, string ImagePath, double WidthPt, double HeightPt)> hyperlinkImages,
+        HashSet<int> usedImages,
+        ref double lastA, ref double lastD, ref double lastE, ref double lastF, ref bool hasCm)
+    {
+        foreach (var item in seq)
+        {
+            if (item is PdfSharp.Pdf.Content.Objects.CSequence sub)
+            {
+                WalkContentForImages(sub, page, hyperlinkImages, usedImages,
+                    ref lastA, ref lastD, ref lastE, ref lastF, ref hasCm);
+                continue;
+            }
+            if (item is not PdfSharp.Pdf.Content.Objects.COperator op) continue;
+
+            if (op.OpCode.Name == "cm" && op.Operands.Count >= 6)
+            {
+                lastA = OpVal(op.Operands[0]);
+                lastD = OpVal(op.Operands[3]);
+                lastE = OpVal(op.Operands[4]);
+                lastF = OpVal(op.Operands[5]);
+                hasCm = true;
+            }
+            else if (op.OpCode.Name == "Do" && hasCm)
+            {
+                // Image was placed — match by size against known hyperlinked images
+                for (int i = 0; i < hyperlinkImages.Count; i++)
+                {
+                    if (usedImages.Contains(i)) continue;
+                    var hi = hyperlinkImages[i];
+                    // Match by width (within 2pt tolerance)
+                    if (Math.Abs(lastA - hi.WidthPt) < 2.0)
+                    {
+                        // PDF coordinates: (lastE, lastF) is bottom-left, size is (lastA x lastD)
+                        double x = lastE;
+                        double y = lastF;
+                        double w = lastA;
+                        double h = Math.Abs(lastD);
+                        // PdfRectangle uses PDF coordinates (origin at bottom-left)
+                        var rect = new PdfSharp.Pdf.PdfRectangle(
+                            new PdfSharp.Drawing.XPoint(x, y),
+                            new PdfSharp.Drawing.XPoint(x + w, y + h));
+                        page.AddWebLink(rect, hi.Url);
+                        usedImages.Add(i);
+                        break;
+                    }
+                }
+                hasCm = false;
+            }
+        }
+    }
+
+    private static double OpVal(PdfSharp.Pdf.Content.Objects.CObject o) => o switch
+    {
+        PdfSharp.Pdf.Content.Objects.CReal r => r.Value,
+        PdfSharp.Pdf.Content.Objects.CInteger ci => ci.Value,
+        _ => 0
+    };
 
     /// <summary>
     /// Process a run element and add its content to the paragraph
@@ -987,7 +1098,7 @@ public static class DocxConverter
     /// </summary>
     private static bool ProcessHyperlink(WordprocessingDocument doc, W.Hyperlink hyperlink, 
         W.Paragraph p, MigraDoc.DocumentObjectModel.Paragraph para, HashSet<string> usedFonts,
-        List<string> tempFiles)
+        List<string> tempFiles, List<(string Url, string ImagePath, double WidthPt, double HeightPt)> hyperlinkImages)
     {
         var mainPart = doc.MainDocumentPart!;
         string? url = null;
@@ -1026,26 +1137,15 @@ public static class DocxConverter
                             info.Bytes, info.CropLeft, info.CropTop, info.CropRight, info.CropBottom);
                         var imgPath = ConverterExtensions.SaveTempImage(imgBytes);
                         tempFiles.Add(imgPath);
-                        if (!string.IsNullOrEmpty(url))
-                        {
-                            var link = para.AddHyperlink(url, HyperlinkType.Web);
-                            var image = link.AddImage(imgPath);
-                            image.LockAspectRatio = true;
-                            if (info.ExtentCxEmu.HasValue)
-                                image.Width = Unit.FromPoint(info.ExtentCxEmu.Value / 12700.0);
-                            else
-                                image.Width = Unit.FromCentimeter(4);
-                        }
-                        else
-                        {
-                            var image = para.AddImage(imgPath);
-                            image.LockAspectRatio = true;
-                            if (info.ExtentCxEmu.HasValue)
-                                image.Width = Unit.FromPoint(info.ExtentCxEmu.Value / 12700.0);
-                            else
-                                image.Width = Unit.FromCentimeter(4);
-                        }
+                        double widthPt = info.ExtentCxEmu.HasValue ? info.ExtentCxEmu.Value / 12700.0 : 113.4;
+                        double heightPt = info.ExtentCyEmu.HasValue ? info.ExtentCyEmu.Value / 12700.0 : 113.4;
+                        var image = para.AddImage(imgPath);
+                        image.LockAspectRatio = true;
+                        image.Width = Unit.FromPoint(widthPt);
                         addedText = true;
+                        // Collect for post-render link annotation
+                        if (!string.IsNullOrEmpty(url))
+                            hyperlinkImages.Add((url, imgPath, widthPt, heightPt));
                     }
                 }
                 catch { }

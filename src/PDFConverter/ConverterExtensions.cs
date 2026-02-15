@@ -6,7 +6,7 @@ namespace PDFConverter
     internal static class ConverterExtensions
     {
         internal record ImageInfo(byte[] Bytes, long? ExtentCxEmu, long? ExtentCyEmu, string? WrapTextAttribute, bool IsBackground, bool IsAnchor, long? OffsetXEmu = null, long? OffsetYEmu = null,
-            int CropLeft = 0, int CropTop = 0, int CropRight = 0, int CropBottom = 0);
+            int CropLeft = 0, int CropTop = 0, int CropRight = 0, int CropBottom = 0, string? HyperlinkUrl = null);
 
         internal static string ToRoman(int number)
         {
@@ -202,7 +202,34 @@ namespace PDFConverter
                 }
                 catch { }
 
-                if (bytes != null) results.Add(new ImageInfo(bytes, cx, cy, wrapText, isBackground, isAnchor, offsetX, offsetY, cropL, cropT, cropR, cropB));
+                if (bytes != null)
+                {
+                    // Extract hyperlink from a:hlinkClick in wp:docPr
+                    string? hyperlinkUrl = null;
+                    try
+                    {
+                        // docPr is a direct child of wp:inline or wp:anchor
+                        var docPrParent = wpAncestor ?? blip.Ancestors().FirstOrDefault(a => a.LocalName == "inline" || a.LocalName == "anchor");
+                        var docPr = docPrParent?.ChildElements
+                            .FirstOrDefault(e => e.LocalName == "docPr");
+                        var hlinkClick = docPr?.ChildElements
+                            .FirstOrDefault(e => e.LocalName == "hlinkClick");
+                        if (hlinkClick != null)
+                        {
+                            const string rNs = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+                            var hlinkRId = hlinkClick.GetAttribute("id", rNs).Value;
+                            if (!string.IsNullOrEmpty(hlinkRId))
+                            {
+                                var rel = doc.MainDocumentPart?.HyperlinkRelationships
+                                    .FirstOrDefault(r => r.Id == hlinkRId);
+                                hyperlinkUrl = rel?.Uri?.ToString();
+                            }
+                        }
+                    }
+                    catch { }
+
+                    results.Add(new ImageInfo(bytes, cx, cy, wrapText, isBackground, isAnchor, offsetX, offsetY, cropL, cropT, cropR, cropB, hyperlinkUrl));
+                }
             }
 
             // VML legacy images and picts: try image data ids

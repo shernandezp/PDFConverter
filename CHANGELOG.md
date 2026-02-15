@@ -2,11 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.3] - 2026-02-15
+
+### Fixed
+- DOCX: Images with DrawingML hyperlinks (`a:hlinkClick` in `wp:docPr`) now produce clickable PDF link annotations via post-render overlay
+
 ## [0.0.2] - 2026-02-15
 
 ### Fixed
 - DOCX: Footer distance (`pgMar.Footer`) was not read from section properties, causing tables near the bottom of the page to overlap the footer in the PDF output
-- DOCX: Images inside hyperlinks were not rendered in the PDF — `ProcessHyperlink` only handled text runs, ignoring `W.Drawing` elements
 
 ## [0.0.1] - 2026-02-14
 

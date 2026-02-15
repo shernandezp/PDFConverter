@@ -232,6 +232,25 @@ public class DocxConverterIntegrationTests : IDisposable
             $"Footer (Y={footerY:F1}) should be below table content (min Y={tableMinY:F1})");
     }
 
+    /// <summary>
+    /// When an image has an a:hlinkClick in its docPr, the resulting PDF should
+    /// contain a link annotation with the correct URI.
+    /// </summary>
+    [Fact]
+    public void DocxToPdf_ImageWithHyperlink_ProducesLinkAnnotation()
+    {
+        var docx = BuildImageWithHyperlinkDocx("https://example.com/test");
+        var pdfBytes = Converters.DocxToPdfBytes(docx);
+
+        AssertValidPdf(pdfBytes);
+
+        // Scan the raw PDF bytes for link annotation markers
+        var pdfText = System.Text.Encoding.ASCII.GetString(pdfBytes);
+        Assert.Contains("/Subtype/Link", pdfText.Replace(" ", ""));
+        Assert.Contains("/URI", pdfText);
+        Assert.Contains("https://example.com/test", pdfText);
+    }
+
     #endregion
 
     #region All Overloads
@@ -564,6 +583,90 @@ public class DocxConverterIntegrationTests : IDisposable
             mainPart.Document = new Document(
                 new Body(table, sectPr));
         }
+        return ms.ToArray();
+    }
+
+    /// <summary>
+    /// Builds a DOCX with an inline image that has an a:hlinkClick hyperlink in its docPr.
+    /// </summary>
+    private static byte[] BuildImageWithHyperlinkDocx(string url)
+    {
+        using var ms = new MemoryStream();
+        using (var doc = WordprocessingDocument.Create(ms, WordprocessingDocumentType.Document))
+        {
+            var mainPart = doc.AddMainDocumentPart();
+
+            // Create a minimal 1x1 red PNG image
+            var imagePart = mainPart.AddImagePart(ImagePartType.Png);
+            var pngBytes = CreateMinimalPng();
+            using (var imgStream = new MemoryStream(pngBytes))
+                imagePart.FeedData(imgStream);
+            var imageRelId = mainPart.GetIdOfPart(imagePart);
+
+            // Add a hyperlink relationship for the image
+            var hlinkRel = mainPart.AddHyperlinkRelationship(new Uri(url), true);
+
+            // Build the drawing XML with a:hlinkClick in docPr
+            var drawingXml = $@"<w:drawing xmlns:w=""http://schemas.openxmlformats.org/wordprocessingml/2006/main""
+                xmlns:wp=""http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing""
+                xmlns:a=""http://schemas.openxmlformats.org/drawingml/2006/main""
+                xmlns:pic=""http://schemas.openxmlformats.org/drawingml/2006/picture""
+                xmlns:r=""http://schemas.openxmlformats.org/officeDocument/2006/relationships"">
+                <wp:inline distT=""0"" distB=""0"" distL=""0"" distR=""0"">
+                    <wp:extent cx=""914400"" cy=""914400"" />
+                    <wp:docPr id=""1"" name=""TestImage"">
+                        <a:hlinkClick r:id=""{hlinkRel.Id}"" />
+                    </wp:docPr>
+                    <wp:cNvGraphicFramePr>
+                        <a:graphicFrameLocks noChangeAspect=""1"" />
+                    </wp:cNvGraphicFramePr>
+                    <a:graphic>
+                        <a:graphicData uri=""http://schemas.openxmlformats.org/drawingml/2006/picture"">
+                            <pic:pic>
+                                <pic:nvPicPr>
+                                    <pic:cNvPr id=""1"" name=""TestImage"" />
+                                    <pic:cNvPicPr />
+                                </pic:nvPicPr>
+                                <pic:blipFill>
+                                    <a:blip r:embed=""{imageRelId}"" />
+                                    <a:stretch><a:fillRect /></a:stretch>
+                                </pic:blipFill>
+                                <pic:spPr>
+                                    <a:xfrm>
+                                        <a:off x=""0"" y=""0"" />
+                                        <a:ext cx=""914400"" cy=""914400"" />
+                                    </a:xfrm>
+                                    <a:prstGeom prst=""rect""><a:avLst /></a:prstGeom>
+                                </pic:spPr>
+                            </pic:pic>
+                        </a:graphicData>
+                    </a:graphic>
+                </wp:inline>
+            </w:drawing>";
+
+            var drawing = new W.Drawing(drawingXml);
+
+            var body = new Body(
+                new W.Paragraph(new W.Run(drawing)),
+                new W.SectionProperties(
+                    new W.PageSize { Width = 12240, Height = 15840 },
+                    new W.PageMargin { Top = 1440, Bottom = 1440, Left = 1440, Right = 1440 }));
+
+            mainPart.Document = new Document(body);
+        }
+        return ms.ToArray();
+    }
+
+    /// <summary>
+    /// Creates a minimal valid PNG image using System.Drawing.
+    /// </summary>
+    private static byte[] CreateMinimalPng()
+    {
+        using var bmp = new System.Drawing.Bitmap(10, 10);
+        using var g = System.Drawing.Graphics.FromImage(bmp);
+        g.Clear(System.Drawing.Color.Red);
+        using var ms = new MemoryStream();
+        bmp.Save(ms, System.Drawing.Imaging.ImageFormat.Png);
         return ms.ToArray();
     }
 

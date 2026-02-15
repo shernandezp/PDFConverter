@@ -7,7 +7,7 @@
 
     <!-- Package metadata for NuGet -->
     <PackageId>DocxXlsx.PDFConverter</PackageId>
-    <Version>0.0.2</Version>
+    <Version>0.0.3</Version>
     <Authors>shernandezp</Authors>
     <Company>shernandezp</Company>
     <Product>PDFConverter</Product>

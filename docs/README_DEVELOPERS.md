@@ -22,9 +22,8 @@ PDFConverter/
 |   |   +-- BorderInfo.cs          # Border info record
 |   |   +-- FontUtils.cs           # Font utilities
 |   |   +-- Fonts/                 # Embedded NotoEmoji-Regular.ttf
-|   |   +-- TestDocuments/         # Sample DOCX/XLSX files for testing
 |   |   +-- pdfconverter-findings.json  # Detailed findings and gotchas
-|   +-- PDFConverter.Tests/        # xUnit test project (138 tests)
+|   +-- PDFConverter.Tests/        # xUnit test project (140 tests)
 |   +-- TestConsole/               # Console app for manual testing
 +-- docs/
 |   +-- README_CLIENTS.md          # Client/consumer documentation
@@ -85,7 +84,7 @@ dotnet pack -c Release
 
 ## Testing
 
-The test project (`PDFConverter.Tests`) contains 138 tests:
+The test project (`PDFConverter.Tests`) contains 140 tests:
 
 - **Unit tests**: Test individual methods with in-memory OpenXML documents (WordHelpers, ConverterExtensions, RunFormat, ParagraphFormat, BorderInfo)
 - **Integration tests**: Convert in-memory OpenXML documents to PDF and validate output (page counts, text content, images, borders)
