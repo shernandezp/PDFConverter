@@ -8,7 +8,8 @@ internal sealed record RunFormat(
     bool Bold,
     bool Italic,
     bool Underline,
-    double? Size)
+    double? Size,
+    bool BoldSpecified = false)
 {
     internal void ApplyTo(FormattedText formatted)
     {
