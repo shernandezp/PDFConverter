@@ -6,7 +6,8 @@ namespace PDFConverter
     internal static class ConverterExtensions
     {
         internal record ImageInfo(byte[] Bytes, long? ExtentCxEmu, long? ExtentCyEmu, string? WrapTextAttribute, bool IsBackground, bool IsAnchor, long? OffsetXEmu = null, long? OffsetYEmu = null,
-            int CropLeft = 0, int CropTop = 0, int CropRight = 0, int CropBottom = 0, string? HyperlinkUrl = null);
+            int CropLeft = 0, int CropTop = 0, int CropRight = 0, int CropBottom = 0, string? HyperlinkUrl = null,
+            string? HorizontalRelFrom = null, string? VerticalRelFrom = null);
 
         internal static string ToRoman(int number)
         {
@@ -117,8 +118,16 @@ namespace PDFConverter
 
             // DrawingML blips (modern WordprocessingML)
             var blipElements = p.Descendants<DocumentFormat.OpenXml.Drawing.Blip>();
+            bool hasDrawingMLImages = false;
             foreach (var blip in blipElements)
             {
+                // Skip blips inside group shapes — individual components can't be rendered correctly
+                if (blip.Ancestors().Any(a => a.LocalName == "wgp" || a.LocalName == "wGrp"))
+                {
+                    hasDrawingMLImages = true; // still suppress VML fallbacks
+                    continue;
+                }
+
                 var rId = blip.Embed?.Value ?? blip.Link?.Value;
                 if (string.IsNullOrEmpty(rId)) continue;
 
@@ -128,6 +137,7 @@ namespace PDFConverter
                 bool isBackground = false;
                 bool isAnchor = false;
                 long? offsetX = null, offsetY = null;
+                string? hRelFrom = null, vRelFrom = null;
                 var wpAncestor = blip.Ancestors().FirstOrDefault(a => a.LocalName == "anchor" || a.LocalName == "inline");
                 if (wpAncestor != null)
                 {
@@ -164,12 +174,16 @@ namespace PDFConverter
                             var posH = wpAncestor.Descendants().FirstOrDefault(d => d.LocalName == "positionH");
                             if (posH != null)
                             {
+                                var relAttr = posH.GetAttributes().FirstOrDefault(a => string.Equals(a.LocalName, "relativeFrom", StringComparison.OrdinalIgnoreCase));
+                                if (relAttr != null && !string.IsNullOrEmpty(relAttr.Value)) hRelFrom = relAttr.Value;
                                 var posOff = posH.Descendants().FirstOrDefault(d => d.LocalName == "posOffset");
                                 if (posOff != null && long.TryParse(posOff.InnerText, out var hOff)) offsetX = hOff;
                             }
                             var posV = wpAncestor.Descendants().FirstOrDefault(d => d.LocalName == "positionV");
                             if (posV != null)
                             {
+                                var relAttr = posV.GetAttributes().FirstOrDefault(a => string.Equals(a.LocalName, "relativeFrom", StringComparison.OrdinalIgnoreCase));
+                                if (relAttr != null && !string.IsNullOrEmpty(relAttr.Value)) vRelFrom = relAttr.Value;
                                 var posOff = posV.Descendants().FirstOrDefault(d => d.LocalName == "posOffset");
                                 if (posOff != null && long.TryParse(posOff.InnerText, out var vOff)) offsetY = vOff;
                             }
@@ -228,59 +242,69 @@ namespace PDFConverter
                     }
                     catch { }
 
-                    results.Add(new ImageInfo(bytes, cx, cy, wrapText, isBackground, isAnchor, offsetX, offsetY, cropL, cropT, cropR, cropB, hyperlinkUrl));
+                    results.Add(new ImageInfo(bytes, cx, cy, wrapText, isBackground, isAnchor, offsetX, offsetY, cropL, cropT, cropR, cropB, hyperlinkUrl, hRelFrom, vRelFrom));
+                    hasDrawingMLImages = true;
                 }
             }
 
-            // VML legacy images and picts: try image data ids
-            var vmlImages = p.Descendants<DocumentFormat.OpenXml.Vml.ImageData>();
-            foreach (var idata in vmlImages)
+            // VML legacy images and picts — skip when DrawingML images already found (avoids duplicates)
+            if (!hasDrawingMLImages)
             {
-                string? rId = null;
-                try
+                var vmlImages = p.Descendants<DocumentFormat.OpenXml.Vml.ImageData>();
+                foreach (var idata in vmlImages)
                 {
-                    var attr = idata.GetAttributes().FirstOrDefault(a => string.Equals(a.LocalName, "id", StringComparison.OrdinalIgnoreCase));
-                    if (attr != null && !string.IsNullOrEmpty(attr.Value)) rId = attr.Value;
+                    // Skip VML images inside v:group — individual components can't be rendered correctly
+                    if (idata.Ancestors().Any(a => a.LocalName == "group"))
+                        continue;
+                    string? rId = null;
+                    try
+                    {
+                        var attr = idata.GetAttributes().FirstOrDefault(a => string.Equals(a.LocalName, "id", StringComparison.OrdinalIgnoreCase));
+                        if (attr != null && !string.IsNullOrEmpty(attr.Value)) rId = attr.Value;
+                        if (string.IsNullOrEmpty(rId))
+                        {
+                            var href = idata.GetAttributes().FirstOrDefault(a => string.Equals(a.LocalName, "href", StringComparison.OrdinalIgnoreCase));
+                            if (href != null && !string.IsNullOrEmpty(href.Value)) rId = href.Value;
+                        }
+                    }
+                    catch { }
+
                     if (string.IsNullOrEmpty(rId))
                     {
-                        var href = idata.GetAttributes().FirstOrDefault(a => string.Equals(a.LocalName, "href", StringComparison.OrdinalIgnoreCase));
-                        if (href != null && !string.IsNullOrEmpty(href.Value)) rId = href.Value;
+                        var a2 = idata.GetAttributes().FirstOrDefault(a => string.Equals(a.LocalName, "id", StringComparison.OrdinalIgnoreCase));
+                        if (a2 != null && !string.IsNullOrEmpty(a2.Value)) rId = a2.Value;
                     }
-                }
-                catch { }
 
-                if (string.IsNullOrEmpty(rId))
+                    var bytes = OpenXmlHelpers.GetImageBytesFromWord(doc, rId);
+                    if (bytes != null) results.Add(new ImageInfo(bytes, null, null, null, false, false));
+                }
+
+                // Legacy <w:pict> <v:imagedata/> inside Picture elements
+                var pics = p.Descendants<DocumentFormat.OpenXml.Wordprocessing.Picture>();
+                foreach (var pic in pics)
                 {
-                    var a2 = idata.GetAttributes().FirstOrDefault(a => string.Equals(a.LocalName, "id", StringComparison.OrdinalIgnoreCase));
-                    if (a2 != null && !string.IsNullOrEmpty(a2.Value)) rId = a2.Value;
-                }
+                    // Skip pictures inside v:group elements
+                    if (pic.Ancestors().Any(a => a.LocalName == "group"))
+                        continue;
+                    var imgData = pic.Descendants<DocumentFormat.OpenXml.Vml.ImageData>().FirstOrDefault();
+                    if (imgData == null) continue;
+                    string? rId = null;
+                    try
+                    {
+                        var attr = imgData.GetAttributes().FirstOrDefault(a => string.Equals(a.LocalName, "id", StringComparison.OrdinalIgnoreCase));
+                        if (attr != null && !string.IsNullOrEmpty(attr.Value)) rId = attr.Value;
+                    }
+                    catch { }
 
-                var bytes = OpenXmlHelpers.GetImageBytesFromWord(doc, rId);
-                if (bytes != null) results.Add(new ImageInfo(bytes, null, null, null, false, false));
-            }
-
-            // Legacy <w:pict> <v:imagedata/> inside Picture elements
-            var pics = p.Descendants<DocumentFormat.OpenXml.Wordprocessing.Picture>();
-            foreach (var pic in pics)
-            {
-                var imgData = pic.Descendants<DocumentFormat.OpenXml.Vml.ImageData>().FirstOrDefault();
-                if (imgData == null) continue;
-                string? rId = null;
-                try
-                {
-                    var attr = imgData.GetAttributes().FirstOrDefault(a => string.Equals(a.LocalName, "id", StringComparison.OrdinalIgnoreCase));
-                    if (attr != null && !string.IsNullOrEmpty(attr.Value)) rId = attr.Value;
+                    if (string.IsNullOrEmpty(rId))
+                    {
+                        var a2 = imgData.GetAttributes().FirstOrDefault(a => string.Equals(a.LocalName, "id", StringComparison.OrdinalIgnoreCase));
+                        if (a2 != null && !string.IsNullOrEmpty(a2.Value)) rId = a2.Value;
+                    }
+                    if (string.IsNullOrEmpty(rId)) continue;
+                    var bytes = OpenXmlHelpers.GetImageBytesFromWord(doc, rId);
+                    if (bytes != null) results.Add(new ImageInfo(bytes, null, null, null, false, false));
                 }
-                catch { }
-
-                if (string.IsNullOrEmpty(rId))
-                {
-                    var a2 = imgData.GetAttributes().FirstOrDefault(a => string.Equals(a.LocalName, "id", StringComparison.OrdinalIgnoreCase));
-                    if (a2 != null && !string.IsNullOrEmpty(a2.Value)) rId = a2.Value;
-                }
-                if (string.IsNullOrEmpty(rId)) continue;
-                var bytes = OpenXmlHelpers.GetImageBytesFromWord(doc, rId);
-                if (bytes != null) results.Add(new ImageInfo(bytes, null, null, null, false, false));
             }
 
             return results;
@@ -290,6 +314,33 @@ namespace PDFConverter
         {
             string ext = DetectImageExtension(bytes);
             string tmp = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"copilot_img_{Guid.NewGuid():N}{ext}");
+
+            // PdfSharp cannot handle certain PNG formats (indexed palette, 1-bit depth).
+            // Detect from raw IHDR and re-encode as 32-bit ARGB PNG via System.Drawing.
+            if (ext == ".png" && bytes.Length >= 26 && System.OperatingSystem.IsWindows())
+            {
+                byte colorType = bytes[25]; // IHDR colorType: 3=indexed, 0=grayscale
+                byte bitDepth = bytes[24];
+                if (colorType == 3 || bitDepth < 8)
+                {
+                    try
+                    {
+                        using var ms = new System.IO.MemoryStream(bytes);
+                        using var original = new System.Drawing.Bitmap(ms);
+                        using var converted = new System.Drawing.Bitmap(original.Width, original.Height,
+                            System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+                        using (var g = System.Drawing.Graphics.FromImage(converted))
+                        {
+                            g.DrawImage(original, 0, 0, original.Width, original.Height);
+                        }
+                        converted.Save(tmp, System.Drawing.Imaging.ImageFormat.Png);
+                        OpenXmlHelpers.ImageLoadLogger?.Invoke($"Converted indexed/low-bit PNG to 32-bit ARGB: {tmp} ({bytes.Length}b → {new System.IO.FileInfo(tmp).Length}b)");
+                        return tmp;
+                    }
+                    catch { }
+                }
+            }
+
             System.IO.File.WriteAllBytes(tmp, bytes);
             return tmp;
         }

@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.4] - 2026-04-04
+
+### Added
+- DOCX: Structured Document Tags (SDT) support — `w:sdt` content controls now render their inner text, images, and hyperlinks in both body paragraphs and table cells
+- DOCX: Theme font resolution — runs inheriting fonts from document theme (e.g., minor font) now resolve correctly
+- DOCX: Diagnostic tool (PdfInspector) for inspecting generated PDF page structure, images, and text content
+- DOCX: IMGLOG environment variable support in TestConsole for image processing diagnostics
+- DOCX: PNG format conversion for indexed-palette and low-bit-depth images incompatible with PdfSharp
+
+### Fixed
+- DOCX: Bold formatting override in conditional table styles — explicit `w:b val="0"` now respected when conditional style applies bold
+- DOCX: Anchor images with `behindDoc` flag rendered inline instead of as floating shapes at their specified positions
+- DOCX: Anchor image horizontal/vertical positioning now maps Word `relativeFrom` attributes (page, margin, column, paragraph) to correct MigraDoc relative positioning
+- DOCX: VML group shape images no longer extracted as individual broken inline images
+- DOCX: VML fallback images no longer duplicated when DrawingML images exist in the same paragraph
+- DOCX: Document default font size (docDefaults) now used as fallback when no style or run specifies a size
+
 ## [0.0.3] - 2026-02-15
 
 ### Fixed

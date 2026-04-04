@@ -218,9 +218,34 @@ public static class DocxConverter
                         var infos = ConverterExtensions.GetImageInfosFromParagraph(word, hp).ToList();
                         if (infos.Count == 0) continue;
 
-                        // Separate background images from inline images
-                        var bgImages = infos.Where(i => i.IsBackground).ToList();
-                        var inlineImages = infos.Where(i => !i.IsBackground).ToList();
+                        // Separate background images from inline images.
+                        // Also treat full-page anchor images (wrapNone) in headers as background:
+                        // they act as visual page backgrounds in Word despite not having behindDoc="1".
+                        var pageWPt = section.PageSetup.PageWidth.Point;
+                        var pageHPt = section.PageSetup.PageHeight.Point;
+                        var bgImages = new List<ConverterExtensions.ImageInfo>();
+                        var inlineImages = new List<ConverterExtensions.ImageInfo>();
+                        foreach (var info in infos)
+                        {
+                            if (info.IsBackground)
+                            {
+                                bgImages.Add(info);
+                            }
+                            else if (info.IsAnchor && info.ExtentCxEmu.HasValue && info.ExtentCyEmu.HasValue)
+                            {
+                                var wPt = EmuToPoints(info.ExtentCxEmu.Value);
+                                var hPt = EmuToPoints(info.ExtentCyEmu.Value);
+                                // If the image covers most of the page, treat as background
+                                if (wPt > pageWPt * 0.8 && hPt > pageHPt * 0.8)
+                                    bgImages.Add(info);
+                                else
+                                    inlineImages.Add(info);
+                            }
+                            else
+                            {
+                                inlineImages.Add(info);
+                            }
+                        }
 
                         // Process background images
                         foreach (var info in bgImages)
@@ -417,7 +442,21 @@ public static class DocxConverter
         var numberingCounters = new Dictionary<string, int[]>();
 
         int _paraIndex = 0;
-        foreach (var element in body.Elements())
+        // Flatten body elements, unwrapping block-level content controls (w:sdt) into their inner content
+        var bodyElements = new List<DocumentFormat.OpenXml.OpenXmlElement>();
+        foreach (var el in body.Elements())
+        {
+            if (el is W.SdtBlock sdtBlock)
+            {
+                var sdtContent = sdtBlock.SdtContentBlock;
+                if (sdtContent != null)
+                    bodyElements.AddRange(sdtContent.Elements());
+            }
+            else
+                bodyElements.Add(el);
+        }
+
+        foreach (var element in bodyElements)
         {
             if (element is W.Paragraph p)
             {
@@ -555,37 +594,54 @@ public static class DocxConverter
                 var infos = ConverterExtensions.GetImageInfosFromParagraph(word, p).ToList();
                 if (infos.Count > 0 && string.IsNullOrWhiteSpace(ConverterExtensions.GetParagraphText(p)))
                 {
+                    bool hasInlineRenderedImages = false;
+                    bool hasForegroundFloatingAnchors = false;
                     foreach (var info in infos)
                     {
                         if (info.Bytes == null || info.Bytes.Length == 0) continue;
-                        // Skip very small behindDoc images (< 500 bytes) — likely transparent placeholders
-                        if (info.Bytes.Length < 500 && info.IsBackground)
-                        {
-                            OpenXmlHelpers.ImageLoadLogger?.Invoke($"Skipping tiny behindDoc image ({info.Bytes.Length} bytes) — likely placeholder");
-                            continue;
-                        }
                         var imgPath = ConverterExtensions.SaveTempImage(info.Bytes);
                         tempFiles.Add(imgPath);
                         try
                         {
-                            // For images found in the document body we do NOT promote them to header/background
-                            // unless the drawing explicitly marked them as behind the document (info.IsBackground).
-                            if (info.IsBackground)
+                            if (info.IsAnchor && info.OffsetXEmu.HasValue)
                             {
-                                // Positioned anchors with behindDoc in body: render inline at their specified size
-                                // since absolute page positioning is not feasible (paragraph Y is unknown)
-                                if (info.IsAnchor && info.ExtentCxEmu.HasValue)
+                                // ALL positioned anchor images → floating shapes at exact position and size
+                                double imgWidthPt = info.ExtentCxEmu.HasValue ? EmuToPoints(info.ExtentCxEmu.Value) : Unit.FromCentimeter(4).Point;
+                                double imgHeightPt = info.ExtentCyEmu.HasValue ? EmuToPoints(info.ExtentCyEmu.Value) : 113.4;
+                                var floatImage = section.AddImage(imgPath);
+                                floatImage.LockAspectRatio = true;
+                                floatImage.Width = Unit.FromPoint(imgWidthPt);
+                                floatImage.WrapFormat.Style = MigraDoc.DocumentObjectModel.Shapes.WrapStyle.Through;
+
+                                // Map Word relativeFrom to MigraDoc relative positioning
+                                floatImage.RelativeHorizontal = (info.HorizontalRelFrom?.ToLowerInvariant()) switch
                                 {
-                                    var imgPara = section.AddParagraph();
-                                    var image = imgPara.AddImage(imgPath);
-                                    image.LockAspectRatio = true;
-                                    image.Width = Unit.FromPoint(EmuToPoints(info.ExtentCxEmu.Value));
-                                    imgPara.Format.Alignment = ParagraphAlignment.Left;
-                                    if (info.OffsetXEmu.HasValue && info.OffsetXEmu.Value > 0)
-                                        imgPara.Format.LeftIndent = Unit.FromPoint(EmuToPoints(info.OffsetXEmu.Value));
-                                    OpenXmlHelpers.ImageLoadLogger?.Invoke($"Rendered positioned behindDoc image inline: {imgPath} width={EmuToPoints(info.ExtentCxEmu.Value):F1}pt");
-                                }
-                                else if (!backgroundFiles.Contains(imgPath))
+                                    "page" => MigraDoc.DocumentObjectModel.Shapes.RelativeHorizontal.Page,
+                                    "margin" => MigraDoc.DocumentObjectModel.Shapes.RelativeHorizontal.Margin,
+                                    _ => MigraDoc.DocumentObjectModel.Shapes.RelativeHorizontal.Margin, // "column" maps to margin for single-column
+                                };
+                                floatImage.RelativeVertical = (info.VerticalRelFrom?.ToLowerInvariant()) switch
+                                {
+                                    "page" => MigraDoc.DocumentObjectModel.Shapes.RelativeVertical.Page,
+                                    "margin" => MigraDoc.DocumentObjectModel.Shapes.RelativeVertical.Margin,
+                                    _ => MigraDoc.DocumentObjectModel.Shapes.RelativeVertical.Paragraph,
+                                };
+
+                                floatImage.Left = Unit.FromPoint(EmuToPoints(info.OffsetXEmu.Value));
+                                if (info.OffsetYEmu.HasValue)
+                                    floatImage.Top = Unit.FromPoint(EmuToPoints(info.OffsetYEmu.Value));
+                                else
+                                    floatImage.Top = Unit.FromPoint(0);
+
+                                if (!string.IsNullOrEmpty(info.HyperlinkUrl))
+                                    hyperlinkImages.Add((info.HyperlinkUrl, imgPath, imgWidthPt, imgHeightPt));
+                                if (!info.IsBackground)
+                                    hasForegroundFloatingAnchors = true;
+                            }
+                            else if (info.IsBackground && !info.IsAnchor)
+                            {
+                                // Non-anchor background images (header-derived) → collect for page background
+                                if (!backgroundFiles.Contains(imgPath))
                                 {
                                     backgroundFiles.Add(imgPath);
                                     OpenXmlHelpers.ImageLoadLogger?.Invoke($"Collected background image (body): {imgPath}");
@@ -628,6 +684,7 @@ public static class DocxConverter
                                 }
 
                                 section.AddParagraph();
+                                hasInlineRenderedImages = true;
                             }
                         }
                         catch (Exception ex)
@@ -635,10 +692,14 @@ public static class DocxConverter
                             OpenXmlHelpers.ImageLoadLogger?.Invoke($"Failed processing body image {imgPath}: {ex.Message}");
                         }
                     }
-                    continue;
+                    if (hasInlineRenderedImages || !hasForegroundFloatingAnchors) continue;
+                    // Foreground floating-only anchor paragraphs fall through to normal paragraph processing
                 }
 
                 // Pre-render positioned anchor images as floating shapes
+                // Skip for pure-image paragraphs whose floating anchors were already handled above
+                bool skipPreRender = infos.Count > 0 && string.IsNullOrWhiteSpace(ConverterExtensions.GetParagraphText(p));
+                if (!skipPreRender)
                 foreach (var run in p.Elements<W.Run>())
                 {
                     var drawing = run.GetFirstChild<W.Drawing>();
@@ -650,7 +711,6 @@ public static class DocxConverter
                         foreach (var info in anchorImgInfos)
                         {
                             if (info.Bytes == null || info.Bytes.Length == 0) continue;
-                            if (info.Bytes.Length < 500 && info.IsBackground) continue;
                             var imgBytes = ConverterExtensions.ApplySrcRectCrop(
                                 info.Bytes, info.CropLeft, info.CropTop, info.CropRight, info.CropBottom);
                             var imgPath = ConverterExtensions.SaveTempImage(imgBytes);
@@ -661,15 +721,25 @@ public static class DocxConverter
                                 image.Width = Unit.FromPoint(EmuToPoints(info.ExtentCxEmu.Value));
                             else
                                 image.Width = Unit.FromCentimeter(4);
-                            // Position as floating image
+                            // Position as floating image using Word's relativeFrom attributes
                             image.WrapFormat.Style = MigraDoc.DocumentObjectModel.Shapes.WrapStyle.Through;
-                            image.RelativeHorizontal = MigraDoc.DocumentObjectModel.Shapes.RelativeHorizontal.Page;
-                            image.RelativeVertical = MigraDoc.DocumentObjectModel.Shapes.RelativeVertical.Page;
+                            image.RelativeHorizontal = (info.HorizontalRelFrom?.ToLowerInvariant()) switch
+                            {
+                                "page" => MigraDoc.DocumentObjectModel.Shapes.RelativeHorizontal.Page,
+                                "margin" => MigraDoc.DocumentObjectModel.Shapes.RelativeHorizontal.Margin,
+                                _ => MigraDoc.DocumentObjectModel.Shapes.RelativeHorizontal.Margin,
+                            };
+                            image.RelativeVertical = (info.VerticalRelFrom?.ToLowerInvariant()) switch
+                            {
+                                "page" => MigraDoc.DocumentObjectModel.Shapes.RelativeVertical.Page,
+                                "margin" => MigraDoc.DocumentObjectModel.Shapes.RelativeVertical.Margin,
+                                _ => MigraDoc.DocumentObjectModel.Shapes.RelativeVertical.Paragraph,
+                            };
                             image.Left = Unit.FromPoint(EmuToPoints(info.OffsetXEmu.Value));
                             if (info.OffsetYEmu.HasValue)
-                                image.Top = Unit.FromPoint(EmuToPoints(info.OffsetYEmu.Value) + section.PageSetup.TopMargin.Point);
+                                image.Top = Unit.FromPoint(EmuToPoints(info.OffsetYEmu.Value));
                             else
-                                image.Top = section.PageSetup.TopMargin;
+                                image.Top = Unit.FromPoint(0);
                         }
                     }
                     catch { }
@@ -710,6 +780,13 @@ public static class DocxConverter
                         var szVal = nsr?.FontSize?.Val?.Value;
                         if (!string.IsNullOrEmpty(szVal) && double.TryParse(szVal, out var nHalf)) 
                             effectiveFontSize = nHalf / 2.0;
+                    }
+                    if (effectiveFontSize == 0)
+                    {
+                        var docDefaultsRPr = WordHelpers.GetDocDefaultsRunProperties(word.MainDocumentPart);
+                        var szVal = docDefaultsRPr?.FontSize?.Val?.Value;
+                        if (!string.IsNullOrEmpty(szVal) && double.TryParse(szVal, out var dHalf))
+                            effectiveFontSize = dHalf / 2.0;
                     }
                     if (effectiveFontSize == 0) effectiveFontSize = 11.0; // fallback
                 }
@@ -835,6 +912,53 @@ public static class DocxConverter
                     {
                         addedText |= ProcessHyperlink(word, hyperlink, p, para, usedFonts, tempFiles, hyperlinkImages);
                     }
+                    else if (child is W.SdtRun sdtRun)
+                    {
+                        // Process content controls (structured document tags) — unwrap and render inner content
+                        var sdtContent = sdtRun.SdtContentRun;
+                        if (sdtContent == null) continue;
+
+                        foreach (var sdtChild in sdtContent.ChildElements)
+                        {
+                            if (sdtChild is W.Run sdtRunChild)
+                            {
+                                var drawing = sdtRunChild.GetFirstChild<W.Drawing>();
+                                if (drawing != null)
+                                {
+                                    try
+                                    {
+                                        var runInfos = ConverterExtensions.GetImageInfosFromParagraph(word,
+                                            new W.Paragraph(sdtRunChild.CloneNode(true))).ToList();
+                                        foreach (var info in runInfos)
+                                        {
+                                            if (info.IsAnchor && info.OffsetXEmu.HasValue) continue;
+                                            if (info.Bytes == null || info.Bytes.Length == 0) continue;
+                                            if (info.Bytes.Length < 500 && info.IsBackground) continue;
+                                            var imgBytes = ConverterExtensions.ApplySrcRectCrop(
+                                                info.Bytes, info.CropLeft, info.CropTop, info.CropRight, info.CropBottom);
+                                            var imgPath = ConverterExtensions.SaveTempImage(imgBytes);
+                                            tempFiles.Add(imgPath);
+                                            var image = para.AddImage(imgPath);
+                                            image.LockAspectRatio = true;
+                                            double imgWidthPt = info.ExtentCxEmu.HasValue ? EmuToPoints(info.ExtentCxEmu.Value) : 113.4;
+                                            double imgHeightPt = info.ExtentCyEmu.HasValue ? EmuToPoints(info.ExtentCyEmu.Value) : 113.4;
+                                            image.Width = Unit.FromPoint(imgWidthPt);
+                                            addedText = true;
+                                            if (!string.IsNullOrEmpty(info.HyperlinkUrl))
+                                                hyperlinkImages.Add((info.HyperlinkUrl, imgPath, imgWidthPt, imgHeightPt));
+                                        }
+                                    }
+                                    catch { }
+                                }
+
+                                addedText |= ProcessRun(word.MainDocumentPart, sdtRunChild, p, para, usedFonts);
+                            }
+                            else if (sdtChild is W.Hyperlink sdtHyperlink)
+                            {
+                                addedText |= ProcessHyperlink(word, sdtHyperlink, p, para, usedFonts, tempFiles, hyperlinkImages);
+                            }
+                        }
+                    }
                 }
 
                 // Render collected VML textbox content
@@ -897,12 +1021,25 @@ public static class DocxConverter
             }
         }
 
-        // Apply Normal style font from used fonts or default to Arial
+        // Apply Normal style font from docDefaults, theme, or default to Arial
         try
         {
             var normal = doc.Styles["Normal"];
             if (normal != null)
-                normal.Font.Name = usedFonts.FirstOrDefault() ?? "Arial";
+            {
+                var docDefaultsRPr = WordHelpers.GetDocDefaultsRunProperties(word.MainDocumentPart);
+                var defaultFont = docDefaultsRPr?.RunFonts?.Ascii?.Value
+                    ?? docDefaultsRPr?.RunFonts?.HighAnsi?.Value
+                    ?? docDefaultsRPr?.RunFonts?.ComplexScript?.Value
+                    ?? WordHelpers.GetThemeFont(word.MainDocumentPart)
+                    ?? usedFonts.FirstOrDefault()
+                    ?? "Arial";
+                normal.Font.Name = defaultFont;
+
+                var defaultSzVal = docDefaultsRPr?.FontSize?.Val?.Value;
+                if (!string.IsNullOrEmpty(defaultSzVal) && double.TryParse(defaultSzVal, out var defaultHalf))
+                    normal.Font.Size = defaultHalf / 2.0;
+            }
         }
         catch { }
 

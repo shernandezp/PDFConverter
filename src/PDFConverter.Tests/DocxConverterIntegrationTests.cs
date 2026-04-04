@@ -251,12 +251,28 @@ public class DocxConverterIntegrationTests : IDisposable
         Assert.Contains("https://example.com/test", pdfText);
     }
 
+    /// <summary>
+    /// When a header contains a full-page anchor image (not behindDoc), it should
+    /// be treated as a page background and NOT inflate the page count.
+    /// </summary>
+    [Fact]
+    public void DocxToPdf_FullPageHeaderImage_SinglePage()
+    {
+        var docx = BuildDocxWithFullPageHeaderImage();
+        var pdfBytes = Converters.DocxToPdfBytes(docx);
+
+        AssertValidPdf(pdfBytes);
+        Assert.Equal(1, GetPdfPageCount(pdfBytes));
+
+        var texts = ExtractTexts(pdfBytes);
+        Assert.Contains(texts, t => t.Content.Contains("Body"));
+    }
+
     #endregion
 
     #region All Overloads
 
-    /// <summary>
-    /// All three overloads (byte[], Stream, file path) should produce
+    /// <summary>    /// All three overloads (byte[], Stream, file path) should produce
     /// identical page counts from the same in-memory DOCX.
     /// </summary>
     [Fact]
@@ -343,6 +359,106 @@ public class DocxConverterIntegrationTests : IDisposable
         var output = GetOutputPath("EmptyBytes");
         Assert.ThrowsAny<Exception>(() =>
             DocxConverter.DocxToPdf(Array.Empty<byte>(), output));
+    }
+
+    #endregion
+
+    #region Content Controls (SDT)
+
+    [Fact]
+    public void DocxToPdf_SdtRunInParagraph_RendersText()
+    {
+        // SDT-wrapped inline runs in body paragraphs should be rendered
+        var docxBytes = BuildDocxWithSdtRunInParagraph("DirectText", "SdtWrappedText");
+        var output = GetOutputPath("sdt_run_paragraph");
+        Converters.DocxToPdf(docxBytes, output);
+        Assert.True(File.Exists(output));
+
+        var pdfBytes = File.ReadAllBytes(output);
+        var texts = ExtractTexts(pdfBytes);
+        var all = string.Join(" ", texts.Select(t => t.Content));
+        Assert.Contains("DirectText", all);
+        Assert.Contains("SdtWrappedText", all);
+    }
+
+    [Fact]
+    public void DocxToPdf_SdtBlockInTableCell_RendersText()
+    {
+        // SDT-wrapped paragraphs in table cells should be rendered
+        var docxBytes = BuildDocxWithSdtBlockInTableCell("Label", "SdtCellValue");
+        var output = GetOutputPath("sdt_block_table");
+        Converters.DocxToPdf(docxBytes, output);
+        Assert.True(File.Exists(output));
+
+        var pdfBytes = File.ReadAllBytes(output);
+        var texts = ExtractTexts(pdfBytes);
+        var all = string.Join(" ", texts.Select(t => t.Content));
+        Assert.Contains("Label", all);
+        Assert.Contains("SdtCellValue", all);
+    }
+
+    [Fact]
+    public void DocxToPdf_SdtRunInTableCell_RendersText()
+    {
+        // SDT-wrapped inline runs inside a table cell paragraph should be rendered
+        var docxBytes = BuildDocxWithSdtRunInTableCell("CellLabel", "InlineSdtValue");
+        var output = GetOutputPath("sdt_run_table");
+        Converters.DocxToPdf(docxBytes, output);
+        Assert.True(File.Exists(output));
+
+        var pdfBytes = File.ReadAllBytes(output);
+        var texts = ExtractTexts(pdfBytes);
+        var all = string.Join(" ", texts.Select(t => t.Content));
+        Assert.Contains("CellLabel", all);
+        Assert.Contains("InlineSdtValue", all);
+    }
+
+    [Fact]
+    public void DocxToPdf_SdtRunWithBoldStyle_AppliesBold()
+    {
+        // Text inside SDT with bold run properties should be rendered (not dropped)
+        var docxBytes = BuildDocxWithSdtRunBold("BoldSdtText");
+        var output = GetOutputPath("sdt_run_bold");
+        Converters.DocxToPdf(docxBytes, output);
+        Assert.True(File.Exists(output));
+
+        var pdfBytes = File.ReadAllBytes(output);
+        var texts = ExtractTexts(pdfBytes);
+        var all = string.Join(" ", texts.Select(t => t.Content));
+        Assert.Contains("BoldSdtText", all);
+    }
+
+    [Fact]
+    public void DocxToPdf_TableConditionalBoldOverride_RespectsExplicitFalse()
+    {
+        // When table style applies bold via conditional formatting (firstColumn)
+        // but the run explicitly sets w:b val="0", bold should be off
+        var docxBytes = BuildDocxWithConditionalBoldOverride("NotBold", "StyledBold");
+        var output = GetOutputPath("conditional_bold_override");
+        Converters.DocxToPdf(docxBytes, output);
+        Assert.True(File.Exists(output));
+
+        var pdfBytes = File.ReadAllBytes(output);
+        var texts = ExtractTexts(pdfBytes);
+        var all = string.Join(" ", texts.Select(t => t.Content));
+        Assert.Contains("NotBold", all);
+        Assert.Contains("StyledBold", all);
+    }
+
+    [Fact]
+    public void DocxToPdf_SdtBlockInBody_RendersText()
+    {
+        // Block-level SDT in body (wrapping entire paragraphs) should be rendered
+        var docxBytes = BuildDocxWithSdtBlockInBody("NormalParagraph", "SdtBlockParagraph");
+        var output = GetOutputPath("sdt_block_body");
+        Converters.DocxToPdf(docxBytes, output);
+        Assert.True(File.Exists(output));
+
+        var pdfBytes = File.ReadAllBytes(output);
+        var texts = ExtractTexts(pdfBytes);
+        var all = string.Join(" ", texts.Select(t => t.Content));
+        Assert.Contains("NormalParagraph", all);
+        Assert.Contains("SdtBlockParagraph", all);
     }
 
     #endregion
@@ -667,6 +783,243 @@ public class DocxConverterIntegrationTests : IDisposable
         g.Clear(System.Drawing.Color.Red);
         using var ms = new MemoryStream();
         bmp.Save(ms, System.Drawing.Imaging.ImageFormat.Png);
+        return ms.ToArray();
+    }
+
+    /// <summary>
+    /// Builds a DOCX with a full-page anchor image in the header (not behindDoc).
+    /// This simulates a common Word pattern where a decorative background is placed
+    /// in the header as a large wrapNone anchor image.
+    /// </summary>
+    private static byte[] BuildDocxWithFullPageHeaderImage()
+    {
+        using var ms = new MemoryStream();
+        using (var doc = WordprocessingDocument.Create(ms, WordprocessingDocumentType.Document))
+        {
+            var mainPart = doc.AddMainDocumentPart();
+
+            // Create header with a full-page anchor image
+            var headerPart = mainPart.AddNewPart<HeaderPart>();
+            var headerImagePart = headerPart.AddImagePart(ImagePartType.Png);
+            var pngBytes = CreateMinimalPng();
+            using (var imgStream = new MemoryStream(pngBytes))
+                headerImagePart.FeedData(imgStream);
+            var headerImgRelId = headerPart.GetIdOfPart(headerImagePart);
+
+            // Full-page image: 7772400 EMU wide x 10058400 EMU tall (Letter size)
+            var headerDrawingXml = $@"<w:drawing xmlns:w=""http://schemas.openxmlformats.org/wordprocessingml/2006/main""
+                xmlns:wp=""http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing""
+                xmlns:a=""http://schemas.openxmlformats.org/drawingml/2006/main""
+                xmlns:pic=""http://schemas.openxmlformats.org/drawingml/2006/picture""
+                xmlns:r=""http://schemas.openxmlformats.org/officeDocument/2006/relationships"">
+                <wp:anchor distT=""0"" distB=""0"" distL=""0"" distR=""0""
+                    simplePos=""0"" relativeHeight=""0"" behindDoc=""0""
+                    locked=""0"" layoutInCell=""1"" allowOverlap=""1"">
+                    <wp:simplePos x=""0"" y=""0"" />
+                    <wp:positionH relativeFrom=""page""><wp:posOffset>0</wp:posOffset></wp:positionH>
+                    <wp:positionV relativeFrom=""page""><wp:posOffset>0</wp:posOffset></wp:positionV>
+                    <wp:extent cx=""7772400"" cy=""10058400"" />
+                    <wp:effectExtent l=""0"" t=""0"" r=""0"" b=""0"" />
+                    <wp:wrapNone />
+                    <wp:docPr id=""1"" name=""BgImage"" />
+                    <wp:cNvGraphicFramePr />
+                    <a:graphic>
+                        <a:graphicData uri=""http://schemas.openxmlformats.org/drawingml/2006/picture"">
+                            <pic:pic>
+                                <pic:nvPicPr>
+                                    <pic:cNvPr id=""1"" name=""BgImage"" />
+                                    <pic:cNvPicPr />
+                                </pic:nvPicPr>
+                                <pic:blipFill>
+                                    <a:blip r:embed=""{headerImgRelId}"" />
+                                    <a:stretch><a:fillRect /></a:stretch>
+                                </pic:blipFill>
+                                <pic:spPr>
+                                    <a:xfrm>
+                                        <a:off x=""0"" y=""0"" />
+                                        <a:ext cx=""7772400"" cy=""10058400"" />
+                                    </a:xfrm>
+                                    <a:prstGeom prst=""rect""><a:avLst /></a:prstGeom>
+                                </pic:spPr>
+                            </pic:pic>
+                        </a:graphicData>
+                    </a:graphic>
+                </wp:anchor>
+            </w:drawing>";
+
+            headerPart.Header = new Header(
+                new W.Paragraph(new W.Run(new W.Drawing(headerDrawingXml))));
+
+            var headerRefId = mainPart.GetIdOfPart(headerPart);
+
+            var body = new Body(
+                new W.Paragraph(new W.Run(new W.Text("Body content here"))),
+                new W.SectionProperties(
+                    new W.HeaderReference { Type = HeaderFooterValues.Default, Id = headerRefId },
+                    new W.PageSize { Width = 12240, Height = 15840 },
+                    new W.PageMargin { Top = 1440, Bottom = 1440, Left = 1440, Right = 1440, Header = 720 }));
+
+            mainPart.Document = new Document(body);
+        }
+        return ms.ToArray();
+    }
+
+    private static byte[] BuildDocxWithSdtRunInParagraph(string directText, string sdtText)
+    {
+        using var ms = new MemoryStream();
+        using (var doc = WordprocessingDocument.Create(ms, WordprocessingDocumentType.Document, true))
+        {
+            var mainPart = doc.AddMainDocumentPart();
+            var body = new Body(
+                new W.Paragraph(
+                    new W.Run(new W.Text(directText) { Space = SpaceProcessingModeValues.Preserve }),
+                    new W.SdtRun(
+                        new W.SdtProperties(),
+                        new W.SdtContentRun(
+                            new W.Run(new W.Text(sdtText) { Space = SpaceProcessingModeValues.Preserve })))),
+                new W.SectionProperties(
+                    new W.PageSize { Width = 12240, Height = 15840 }));
+            mainPart.Document = new Document(body);
+        }
+        return ms.ToArray();
+    }
+
+    private static byte[] BuildDocxWithSdtBlockInTableCell(string label, string sdtValue)
+    {
+        using var ms = new MemoryStream();
+        using (var doc = WordprocessingDocument.Create(ms, WordprocessingDocumentType.Document, true))
+        {
+            var mainPart = doc.AddMainDocumentPart();
+            // Cell 0: direct paragraph, Cell 1: SdtBlock wrapping a paragraph
+            var row = new W.TableRow(
+                new W.TableCell(
+                    new W.Paragraph(new W.Run(new W.Text(label)))),
+                new W.TableCell(
+                    new W.SdtBlock(
+                        new W.SdtProperties(),
+                        new W.SdtContentBlock(
+                            new W.Paragraph(new W.Run(new W.Text(sdtValue)))))));
+            var table = new W.Table(
+                new W.TableProperties(new W.TableWidth { Width = "5000", Type = TableWidthUnitValues.Pct }),
+                new W.TableGrid(new W.GridColumn { Width = "4000" }, new W.GridColumn { Width = "4000" }),
+                row);
+            var body = new Body(table,
+                new W.SectionProperties(new W.PageSize { Width = 12240, Height = 15840 }));
+            mainPart.Document = new Document(body);
+        }
+        return ms.ToArray();
+    }
+
+    private static byte[] BuildDocxWithSdtRunInTableCell(string label, string sdtValue)
+    {
+        using var ms = new MemoryStream();
+        using (var doc = WordprocessingDocument.Create(ms, WordprocessingDocumentType.Document, true))
+        {
+            var mainPart = doc.AddMainDocumentPart();
+            // Cell 0: direct run, Cell 1: paragraph with SdtRun
+            var row = new W.TableRow(
+                new W.TableCell(
+                    new W.Paragraph(new W.Run(new W.Text(label)))),
+                new W.TableCell(
+                    new W.Paragraph(
+                        new W.SdtRun(
+                            new W.SdtProperties(),
+                            new W.SdtContentRun(
+                                new W.Run(new W.Text(sdtValue)))))));
+            var table = new W.Table(
+                new W.TableProperties(new W.TableWidth { Width = "5000", Type = TableWidthUnitValues.Pct }),
+                new W.TableGrid(new W.GridColumn { Width = "4000" }, new W.GridColumn { Width = "4000" }),
+                row);
+            var body = new Body(table,
+                new W.SectionProperties(new W.PageSize { Width = 12240, Height = 15840 }));
+            mainPart.Document = new Document(body);
+        }
+        return ms.ToArray();
+    }
+
+    private static byte[] BuildDocxWithSdtRunBold(string sdtText)
+    {
+        using var ms = new MemoryStream();
+        using (var doc = WordprocessingDocument.Create(ms, WordprocessingDocumentType.Document, true))
+        {
+            var mainPart = doc.AddMainDocumentPart();
+            var body = new Body(
+                new W.Paragraph(
+                    new W.SdtRun(
+                        new W.SdtProperties(),
+                        new W.SdtContentRun(
+                            new W.Run(
+                                new W.RunProperties(new W.Bold()),
+                                new W.Text(sdtText))))),
+                new W.SectionProperties(
+                    new W.PageSize { Width = 12240, Height = 15840 }));
+            mainPart.Document = new Document(body);
+        }
+        return ms.ToArray();
+    }
+
+    private static byte[] BuildDocxWithConditionalBoldOverride(string notBoldText, string styledBoldText)
+    {
+        using var ms = new MemoryStream();
+        using (var doc = WordprocessingDocument.Create(ms, WordprocessingDocumentType.Document, true))
+        {
+            var mainPart = doc.AddMainDocumentPart();
+
+            // Create a table style that applies bold via conditional formatting for first column
+            var stylesPart = mainPart.AddNewPart<StyleDefinitionsPart>();
+            var styles = new W.Styles(
+                new W.Style(
+                    new W.StyleName { Val = "BoldFirstCol" },
+                    new W.TableStyleProperties(
+                        new W.RunPropertiesBaseStyle(new W.Bold())
+                    ) { Type = TableStyleOverrideValues.FirstColumn }
+                ) { Type = StyleValues.Table, StyleId = "BoldFirstCol" });
+            stylesPart.Styles = styles;
+
+            // Row with cnfStyle firstColumn on cell 0
+            var cell0 = new W.TableCell(
+                new W.TableCellProperties(
+                    new W.ConditionalFormatStyle { FirstColumn = true }),
+                new W.Paragraph(
+                    new W.Run(
+                        new W.RunProperties(new W.Bold { Val = false }),
+                        new W.Text(notBoldText))));
+            var cell1 = new W.TableCell(
+                new W.Paragraph(
+                    new W.Run(
+                        new W.RunProperties(new W.Bold()),
+                        new W.Text(styledBoldText))));
+            var row = new W.TableRow(cell0, cell1);
+            var table = new W.Table(
+                new W.TableProperties(
+                    new W.TableStyle { Val = "BoldFirstCol" },
+                    new W.TableWidth { Width = "5000", Type = TableWidthUnitValues.Pct },
+                    new W.TableLook { FirstColumn = true }),
+                new W.TableGrid(new W.GridColumn { Width = "4000" }, new W.GridColumn { Width = "4000" }),
+                row);
+            var body = new Body(table,
+                new W.SectionProperties(new W.PageSize { Width = 12240, Height = 15840 }));
+            mainPart.Document = new Document(body);
+        }
+        return ms.ToArray();
+    }
+
+    private static byte[] BuildDocxWithSdtBlockInBody(string normalText, string sdtText)
+    {
+        using var ms = new MemoryStream();
+        using (var doc = WordprocessingDocument.Create(ms, WordprocessingDocumentType.Document, true))
+        {
+            var mainPart = doc.AddMainDocumentPart();
+            var body = new Body(
+                new W.Paragraph(new W.Run(new W.Text(normalText))),
+                new W.SdtBlock(
+                    new W.SdtProperties(),
+                    new W.SdtContentBlock(
+                        new W.Paragraph(new W.Run(new W.Text(sdtText))))),
+                new W.SectionProperties(
+                    new W.PageSize { Width = 12240, Height = 15840 }));
+            mainPart.Document = new Document(body);
+        }
         return ms.ToArray();
     }
 

@@ -9,4 +9,5 @@
   <Project Path="src/PDFConverter.Tests/PDFConverter.Tests.csproj" />
   <Project Path="src/PDFConverter/PDFConverter.csproj" />
   <Project Path="src/TestConsole/TestConsole.csproj" Id="9b620dfa-9091-4560-bd9d-d7eb64e4105b" />
+  <Project Path="src/PdfInspector/PdfInspector.csproj" />
 </Solution>

@@ -3,6 +3,10 @@ using PDFConverter;
 
 Console.WriteLine("PDFConverter Test Console");
 
+// Enable image logging when IMGLOG env var is set
+if (Environment.GetEnvironmentVariable("IMGLOG") == "1")
+    PDFConverter.OpenXmlHelpers.ImageLoadLogger = msg => Console.WriteLine($"[IMG] {msg}");
+
 if (args.Length < 2)
 {
     Console.WriteLine("Usage: TestConsole <docx|xlsx> <input> [output.pdf]");
@@ -50,3 +54,4 @@ catch (Exception ex)
 {
     Console.WriteLine($"Error: {ex.Message}");
 }
+

@@ -294,6 +294,29 @@ internal static class WordHelpers
             return rPrDefault?.GetFirstChild<W.RunProperties>();
         }
 
+        /// <summary>
+        /// Get the minor (body) font from the document's theme part.
+        /// </summary>
+        public static string? GetThemeFont(MainDocumentPart mainPart)
+        {
+            try
+            {
+                var themePart = mainPart?.ThemePart;
+                if (themePart?.Theme == null) return null;
+
+                var minorFont = themePart.Theme
+                    .ThemeElements?
+                    .FontScheme?
+                    .MinorFont;
+                if (minorFont == null) return null;
+
+                var latin = minorFont.LatinFont;
+                var typeface = latin?.Typeface?.Value;
+                return string.IsNullOrEmpty(typeface) ? null : typeface;
+            }
+            catch { return null; }
+        }
+
         public static W.RunProperties? GetStyleRunProperties(MainDocumentPart mainPart, string styleId)
         {
             var stylesPart = mainPart.StyleDefinitionsPart;
@@ -358,6 +381,7 @@ internal static class WordHelpers
             double? size = null;
 
             var rPr = run.RunProperties;
+            bool boldSpecified = rPr?.Bold != null;
             if (rPr != null)
             {
                 fontFamily ??= rPr.RunFonts?.Ascii?.Value ?? rPr.RunFonts?.HighAnsi?.Value ?? rPr.RunFonts?.ComplexScript?.Value;
@@ -381,6 +405,7 @@ internal static class WordHelpers
                 {
                     fontFamily ??= sr.RunFonts?.Ascii?.Value ?? sr.RunFonts?.HighAnsi?.Value ?? sr.RunFonts?.ComplexScript?.Value;
                     color ??= sr.Color?.Val?.Value;
+                    boldSpecified = boldSpecified || sr.Bold != null;
                     bold = bold || (sr.Bold != null && (sr.Bold.Val == null || sr.Bold.Val.Value));
                     italic = italic || (sr.Italic != null && (sr.Italic.Val == null || sr.Italic.Val.Value));
                     underline = underline || (sr.Underline != null && sr.Underline.Val != null && sr.Underline.Val.Value != W.UnderlineValues.None);
@@ -426,7 +451,11 @@ internal static class WordHelpers
                 }
             }
 
-            return new RunFormat(fontFamily, color, bold, italic, underline, size);
+            // Fallback to theme font if no explicit font family resolved
+            if (string.IsNullOrEmpty(fontFamily))
+                fontFamily = GetThemeFont(mainPart);
+
+            return new RunFormat(fontFamily, color, bold, italic, underline, size, boldSpecified);
         }
 
         public static (string numFmt, string lvlText, int? startAt) GetNumberingLevelFormat(MainDocumentPart mainPart, string? numId, int ilvl)

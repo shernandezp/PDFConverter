@@ -348,7 +348,19 @@ internal static class WordTableRenderer
         bool condBold = condRPr?.Bold != null && (condRPr.Bold.Val == null || condRPr.Bold.Val.Value);
         string? condColor = condRPr?.Color?.Val?.Value;
 
-        var paragraphs = wordCell.Elements<W.Paragraph>().ToList();
+        // Get paragraphs: direct children and those inside block-level content controls (w:sdt)
+        var paragraphs = new List<W.Paragraph>();
+        foreach (var cellChild in wordCell.ChildElements)
+        {
+            if (cellChild is W.Paragraph directPara)
+                paragraphs.Add(directPara);
+            else if (cellChild is W.SdtBlock sdtBlock)
+            {
+                var sdtContent = sdtBlock.SdtContentBlock;
+                if (sdtContent != null)
+                    paragraphs.AddRange(sdtContent.Elements<W.Paragraph>());
+            }
+        }
         bool firstPara = true;
 
         foreach (var wp in paragraphs)
@@ -442,6 +454,84 @@ internal static class WordTableRenderer
                 }
             }
 
+            // Handle inline-level content controls (w:sdt wrapping runs within a paragraph)
+            foreach (var sdtRun in wp.Elements<W.SdtRun>())
+            {
+                var sdtContent = sdtRun.SdtContentRun;
+                if (sdtContent == null) continue;
+
+                foreach (var run in sdtContent.Elements<W.Run>())
+                {
+                    var fmt = WordHelpers.ResolveRunFormatting(doc.MainDocumentPart, run, wp);
+                    if (condStyle != null)
+                        fmt = MergeConditionalRunFormat(fmt, condBold, condColor);
+
+                    bool foundText = false;
+                    foreach (var textEl in run.Elements<W.Text>())
+                    {
+                        var txt = textEl.Text;
+                        if (string.IsNullOrEmpty(txt)) continue;
+
+                        if (ConverterExtensions.ContainsEmoji(txt))
+                        {
+                            foreach (var (seg, isEmoji) in ConverterExtensions.SplitEmojiSegments(txt))
+                            {
+                                var formatted = para.AddFormattedText(seg);
+                                fmt.ApplyTo(formatted);
+                                if (isEmoji) formatted.Font.Name = "Noto Emoji";
+                            }
+                        }
+                        else
+                        {
+                            var formatted = para.AddFormattedText(txt);
+                            fmt.ApplyTo(formatted);
+                        }
+                        hasContent = true;
+                        foundText = true;
+                    }
+
+                    if (!foundText)
+                    {
+                        var innerText = run.InnerText;
+                        if (!string.IsNullOrEmpty(innerText))
+                        {
+                            var formatted = para.AddFormattedText(innerText);
+                            hasContent = true;
+                            fmt.ApplyTo(formatted);
+                        }
+                    }
+
+                    foreach (var child in run.ChildElements)
+                    {
+                        if (child is W.Break) para.AddLineBreak();
+                        else if (child is W.TabChar) para.AddTab();
+                    }
+                }
+
+                foreach (var hyperlink in sdtContent.Elements<W.Hyperlink>())
+                {
+                    foreach (var run in hyperlink.Elements<W.Run>())
+                    {
+                        var fmt = WordHelpers.ResolveRunFormatting(doc.MainDocumentPart, run, wp);
+                        if (condStyle != null)
+                            fmt = MergeConditionalRunFormat(fmt, condBold, condColor);
+                        string? txt = null;
+                        foreach (var textEl in run.Elements<W.Text>())
+                        {
+                            txt = textEl.Text;
+                            if (!string.IsNullOrEmpty(txt)) break;
+                        }
+                        txt ??= run.InnerText;
+                        if (!string.IsNullOrEmpty(txt))
+                        {
+                            var formatted = para.AddFormattedText(txt);
+                            hasContent = true;
+                            fmt.ApplyTo(formatted);
+                        }
+                    }
+                }
+            }
+
             // Handle images in the paragraph
             try
             {
@@ -494,7 +584,7 @@ internal static class WordTableRenderer
     {
         return fmt with
         {
-            Bold = fmt.Bold || condBold,
+            Bold = fmt.BoldSpecified ? fmt.Bold : (fmt.Bold || condBold),
             Color = fmt.Color ?? condColor
         };
     }
