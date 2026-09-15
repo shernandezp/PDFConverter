@@ -1,837 +1,690 @@
 using DocumentFormat.OpenXml.Packaging;
-using S = DocumentFormat.OpenXml.Spreadsheet;
 using MigraDoc.DocumentObjectModel;
+using MigraDoc.DocumentObjectModel.Shapes;
 using MigraDoc.DocumentObjectModel.Tables;
+using S = DocumentFormat.OpenXml.Spreadsheet;
 
 namespace PDFConverter;
 
 internal static class ExcelTableRenderer
 {
-    internal static void RenderTable(Section section, WorksheetPart wsPart, List<string>? tempFiles = null)
+    public static void RenderSheet(Section section, WorksheetPart wsPart, TempImageStore images)
     {
-        if (section == null || wsPart == null) return;
-        var sheetData = wsPart.Worksheet.Elements<S.SheetData>().FirstOrDefault();
-        if (sheetData == null) return;
-        var rows = sheetData.Elements<S.Row>().ToList();
-        if (rows.Count == 0) return;
+        var workbookPart = wsPart.GetParentParts().OfType<WorkbookPart>().FirstOrDefault();
+        if (workbookPart == null) return;
 
-        var wbPart = wsPart.GetParentParts().OfType<WorkbookPart>().First();
-        
-        // Determine data bounds from cells that actually contain values
-        int minDataRow = int.MaxValue, maxDataRow = 0;
-        int minDataCol = int.MaxValue, maxDataCol = 0;
-        foreach (var row in rows)
-        {
-            var rowIdx = (int)(row.RowIndex?.Value ?? 1) - 1;
-            foreach (var cell in row.Elements<S.Cell>())
-            {
-                var colIdx = GetColumnIndex(cell.CellReference?.Value);
-                if (rowIdx < minDataRow) minDataRow = rowIdx;
-                if (rowIdx > maxDataRow) maxDataRow = rowIdx;
-                if (colIdx < minDataCol) minDataCol = colIdx;
-                if (colIdx > maxDataCol) maxDataCol = colIdx;
-            }
-        }
-        
-        if (minDataRow == int.MaxValue) return; // no data
+        var styles = ExcelStyles.For(workbookPart);
+        var sheet = SheetGrid.Build(wsPart, styles);
+        if (sheet == null) return;
 
-        // Include merge ranges in bounds (they reference data cells)
-        var mergeRanges = ExcelHelpers.GetMergeCellRanges(wsPart.Worksheet);
-        foreach (var mr in mergeRanges)
-        {
-            if (mr.startRow < minDataRow) minDataRow = mr.startRow;
-            if (mr.endRow > maxDataRow) maxDataRow = mr.endRow;
-            if (mr.startCol < minDataCol) minDataCol = mr.startCol;
-            if (mr.endCol > maxDataCol) maxDataCol = mr.endCol;
-        }
+        var contentWidth = section.PageSetup.PageWidth.Point
+            - section.PageSetup.LeftMargin.Point - section.PageSetup.RightMargin.Point;
+        sheet.ScaleToWidth(contentWidth);
 
-        // Images expand row bounds but NOT column bounds — images anchored
-        // in spacer columns before data get placed at the first data column
-        var imageInfos = ExcelHelpers.GetImagesWithPositionFromWorksheet(wsPart).ToList();
-        foreach (var img in imageInfos)
-        {
-            if (img.FromRow.HasValue && img.FromRow.Value < minDataRow) minDataRow = img.FromRow.Value;
-            if (img.FromRow.HasValue && img.FromRow.Value > maxDataRow) maxDataRow = img.FromRow.Value;
-            // Only expand column bounds if image is within or after data columns
-            if (img.FromCol.HasValue && img.FromCol.Value >= minDataCol && img.FromCol.Value > maxDataCol)
-                maxDataCol = img.FromCol.Value;
-        }
-
-        // Extract connector lines (horizontal lines used as signature underlines etc.)
-        var connectorLines = ExcelHelpers.GetConnectorLines(wsPart);
-        // Build lookup: row offset → list of connector columns (offset from minDataCol)
-        var connectorsByRow = new Dictionary<int, List<(int fromCol, int toCol)>>();
-
-        int numCols = maxDataCol - minDataCol + 1;
-        int numRows = maxDataRow - minDataRow + 1;
-
-        // Populate connector line lookup
-        foreach (var cl in connectorLines)
-        {
-            int rOff = cl.Row - minDataRow;
-            if (rOff < 0 || rOff >= numRows) continue;
-            int cFrom = Math.Max(cl.FromCol - minDataCol, 0);
-            int cTo = Math.Min(cl.ToCol - minDataCol, numCols - 1);
-            if (!connectorsByRow.ContainsKey(rOff))
-                connectorsByRow[rOff] = new List<(int, int)>();
-            connectorsByRow[rOff].Add((cFrom, cTo));
-        }
-
-        // Get column widths for the full sheet, then slice to our data range
-        var allColWidths = ExcelHelpers.GetWorksheetColumnWidths(wsPart, maxDataCol + 1);
-        var colWidths = new List<double>();
-        for (int i = minDataCol; i <= maxDataCol; i++)
-        {
-            colWidths.Add(i < allColWidths.Count ? allColWidths[i] : 48);
-        }
-
-        // Calculate page content width
-        double pageContentWidth = section.PageSetup.PageWidth.Point - 
-            section.PageSetup.LeftMargin.Point - section.PageSetup.RightMargin.Point;
-
-        // Scale columns only if they exceed page width; never scale up
-        double totalWidth = colWidths.Sum();
-        double scaleFactor = 1.0;
-        if (totalWidth > pageContentWidth && totalWidth > 0)
-        {
-            scaleFactor = pageContentWidth / totalWidth;
-        }
+        var placement = ImagePlacement.Build(sheet, images);
+        sheet.CollapseEmptyRows(placement);
 
         var table = section.AddTable();
-        table.Borders.Width = Unit.FromPoint(0);
-        
-        // Center the table on the page when it's narrower than the content area
-        double actualTableWidth = totalWidth * scaleFactor;
-        if (actualTableWidth < pageContentWidth)
+        table.Borders.Width = 0;
+        table.LeftPadding = 0;
+        table.RightPadding = 0;
+        foreach (var width in sheet.ColumnWidths) table.AddColumn(Unit.FromPoint(width));
+
+        var indent = Math.Max(0, (contentWidth - sheet.TableWidth) / 2);
+        if (indent > 0) table.Rows.LeftIndent = Unit.FromPoint(indent);
+
+        for (var row = 0; row < sheet.RowCount; row++)
+            RenderRow(table, sheet, styles, placement, row);
+
+        RenderFloatingImages(section, sheet, placement, indent);
+    }
+
+    sealed class SheetGrid
+    {
+        public required int MinRow { get; init; }
+        public required int MinColumn { get; init; }
+        public required int RowCount { get; init; }
+        public required int ColumnCount { get; init; }
+        public required S.Cell?[,] Cells { get; init; }
+        public required double?[] RowHeights { get; init; }
+        public required bool[] ClipsToHeight { get; init; }
+        public required double[] OriginalRowHeights { get; init; }
+        public required List<double> ColumnWidths { get; init; }
+        public required List<double> SheetColumnWidths { get; init; }
+        public required List<MergeRange> Merges { get; init; }
+        public required HashSet<(int Row, int Column)> CoveredByMerge { get; init; }
+        public required HashSet<(int Row, int Column)> SkipHorizontalMerge { get; init; }
+        public required Dictionary<int, List<Connector>> Connectors { get; init; }
+        public double ScaleFactor { get; private set; } = 1.0;
+        public required List<ExcelHelpers.ExcelImageInfo> Images { get; init; }
+        public required ExcelStyles Styles { get; init; }
+
+        public double TableWidth => ColumnWidths.Sum();
+
+        public double RowHeight(int row) => RowHeights[row] ?? LayoutDefaults.ExcelRowHeightPoints;
+
+        public double ColumnOffset(int column)
         {
-            double indent = (pageContentWidth - actualTableWidth) / 2;
-            table.Rows.LeftIndent = Unit.FromPoint(indent);
-        }
-        
-        for (int i = 0; i < numCols; i++)
-        {
-            double w = i < colWidths.Count ? colWidths[i] : 48;
-            table.AddColumn(Unit.FromPoint(w * scaleFactor));
+            double offset = 0;
+            for (var i = 0; i < column && i < ColumnWidths.Count; i++) offset += ColumnWidths[i];
+            return offset;
         }
 
-        // Index row data by original row index
-        var rowDataByIndex = new Dictionary<int, S.Row>();
-        foreach (var row in rows)
+        static double SheetOffset(List<double> widths, int column)
         {
-            var rowIdx = (int)(row.RowIndex?.Value ?? 1) - 1;
-            rowDataByIndex[rowIdx] = row;
+            double offset = 0;
+            for (var i = 0; i < column && i < widths.Count; i++) offset += widths[i];
+            return offset;
         }
 
-        // Build a sparse matrix from row data
-        var cellMatrix = new S.Cell?[numRows, numCols];
-        var rowHeights = new double?[numRows];
-        foreach (var row in rows)
-        {
-            var rowIdx = (int)(row.RowIndex?.Value ?? 1) - 1;
-            if (rowIdx < minDataRow || rowIdx > maxDataRow) continue;
-            int rOff = rowIdx - minDataRow;
-            
-            // Capture row heights (use ht attribute if present)
-            if (row.Height?.Value != null)
-                rowHeights[rOff] = row.Height.Value;
+        public double SheetStart(int sheetColumn, double offsetPoints) =>
+            SheetOffset(SheetColumnWidths, sheetColumn) + offsetPoints
+                - SheetOffset(SheetColumnWidths, MinColumn);
 
-            foreach (var cell in row.Elements<S.Cell>())
+        public int ColumnAt(double offset)
+        {
+            double running = 0;
+            for (var i = 0; i < ColumnCount; i++)
             {
-                var colIdx = GetColumnIndex(cell.CellReference?.Value);
-                if (colIdx < minDataCol || colIdx > maxDataCol) continue;
-                int cOff = colIdx - minDataCol;
-                cellMatrix[rOff, cOff] = cell;
+                running += ColumnWidths[i];
+                if (offset < running) return i;
             }
+            return ColumnCount - 1;
         }
 
-        // Track which cells are covered by horizontal merges only
-        // MergeDown is avoided due to MigraDoc GetMinMergedCell bug
-        var mergedCells = new HashSet<(int row, int col)>();
-        var offsetMerges = new List<(int startRow, int startCol, int endRow, int endCol)>();
-        // Detect merges where MigraDoc would extend partial borders from the row
-        // above across the full merged width. These merges skip MergeRight but
-        // simulate centering via left indent instead.
-        var borderExtensionMerges = new HashSet<(int row, int col)>();
-        foreach (var mr in mergeRanges)
-        {
-            int sRow = mr.startRow - minDataRow;
-            int eRow = mr.endRow - minDataRow;
-            int sCol = mr.startCol - minDataCol;
-            int eCol = mr.endCol - minDataCol;
-            offsetMerges.Add((sRow, sCol, eRow, eCol));
-            for (int c = sCol + 1; c <= eCol; c++)
-            {
-                if (sRow >= 0 && c >= 0 && sRow < numRows && c < numCols)
-                    mergedCells.Add((sRow, c));
-            }
+        public bool HidesText(int row, double fontSize) =>
+            ClipsToHeight[row] && RowHeight(row) < fontSize * LayoutDefaults.ExcelLineHeightRatio;
 
-            // Check for border extension: merged cell has no top border but
-            // row above has inconsistent bottom borders (some present, some not)
-            int colSpan = Math.Min(eCol, numCols - 1) - sCol;
-            if (colSpan > 0 && sRow > 0 && sRow < numRows)
+        public S.Cell? CellAt(int row, int column) =>
+            row >= 0 && row < RowCount && column >= 0 && column < ColumnCount ? Cells[row, column] : null;
+
+        public string CellText(int row, int column)
+        {
+            var cell = CellAt(row, column);
+            return cell == null ? string.Empty : ReadCellValue(cell, Styles);
+        }
+
+        public bool RowHasText(int row)
+        {
+            for (var column = 0; column < ColumnCount; column++)
+                if (!string.IsNullOrEmpty(CellText(row, column))) return true;
+            return false;
+        }
+
+        public static SheetGrid? Build(WorksheetPart wsPart, ExcelStyles styles)
+        {
+            var worksheet = wsPart.Worksheet;
+            var sheetData = worksheet?.Elements<S.SheetData>().FirstOrDefault();
+            var rows = sheetData?.Elements<S.Row>().ToList() ?? [];
+            if (rows.Count == 0) return null;
+
+            int minRow = int.MaxValue, maxRow = 0, minColumn = int.MaxValue, maxColumn = 0;
+            foreach (var row in rows)
             {
-                var anchorCell = cellMatrix[sRow, sCol];
-                var anchorStyle = ExcelHelpers.GetCellStyleInfo(wbPart, anchorCell?.StyleIndex?.Value);
-                if (anchorStyle.Borders.TopWidth == 0)
+                var rowIndex = (int)(row.RowIndex?.Value ?? 1) - 1;
+                foreach (var cell in row.Elements<S.Cell>())
                 {
-                    bool hasAbove = false, missingAbove = false;
-                    for (int mc = sCol; mc <= sCol + colSpan; mc++)
-                    {
-                        if (mc < 0 || mc >= numCols) continue;
-                        var aboveCell = cellMatrix[sRow - 1, mc];
-                        var aboveStyle = ExcelHelpers.GetCellStyleInfo(wbPart,
-                            aboveCell?.StyleIndex?.Value);
-                        if (aboveStyle.Borders.BottomWidth > 0) hasAbove = true;
-                        else missingAbove = true;
-                    }
-                    // Only skip merge if the anchor column is wide enough to hold
-                    // text with centering indent (otherwise text wraps unusably)
-                    double anchorColW = (sCol >= 0 && sCol < colWidths.Count)
-                        ? colWidths[sCol] * scaleFactor : 0;
-                    if (hasAbove && missingAbove && anchorColW >= 40)
-                        borderExtensionMerges.Add((sRow, sCol));
+                    var column = ExcelHelpers.GetColumnIndex(cell.CellReference?.Value);
+                    if (column < 0) continue;
+                    minRow = Math.Min(minRow, rowIndex);
+                    maxRow = Math.Max(maxRow, rowIndex);
+                    minColumn = Math.Min(minColumn, column);
+                    maxColumn = Math.Max(maxColumn, column);
+                }
+            }
+            if (minRow == int.MaxValue) return null;
+
+            var mergeRanges = ExcelHelpers.GetMergeCellRanges(worksheet!);
+            foreach (var merge in mergeRanges)
+            {
+                minRow = Math.Min(minRow, merge.startRow);
+                maxRow = Math.Max(maxRow, merge.endRow);
+                minColumn = Math.Min(minColumn, merge.startCol);
+                maxColumn = Math.Max(maxColumn, merge.endCol);
+            }
+
+            var connectorLines = ExcelHelpers.GetConnectorLines(wsPart);
+
+            var images = ExcelHelpers.GetImagesWithPositionFromWorksheet(wsPart);
+            foreach (var image in images)
+            {
+                if (image.FromRow is not { } imageRow) continue;
+                minRow = Math.Min(minRow, imageRow);
+                maxRow = Math.Max(maxRow, imageRow);
+                if (image.FromCol is { } imageColumn && imageColumn >= minColumn)
+                    maxColumn = Math.Max(maxColumn, imageColumn);
+            }
+
+            var rowCount = maxRow - minRow + 1;
+            var columnCount = maxColumn - minColumn + 1;
+
+            var cells = new S.Cell?[rowCount, columnCount];
+            var rowHeights = new double?[rowCount];
+            var clipsToHeight = new bool[rowCount];
+            foreach (var row in rows)
+            {
+                var rowIndex = (int)(row.RowIndex?.Value ?? 1) - 1 - minRow;
+                if (rowIndex < 0 || rowIndex >= rowCount) continue;
+                if (row.Height?.Value is { } height) rowHeights[rowIndex] = height;
+                clipsToHeight[rowIndex] = row.CustomHeight?.Value == true;
+
+                foreach (var cell in row.Elements<S.Cell>())
+                {
+                    var column = ExcelHelpers.GetColumnIndex(cell.CellReference?.Value) - minColumn;
+                    if (column >= 0 && column < columnCount) cells[rowIndex, column] = cell;
+                }
+            }
+
+            var sheetColumnWidths = ExcelHelpers.GetWorksheetColumnWidths(wsPart, maxColumn + 1);
+            var columnWidths = new List<double>(columnCount);
+            for (var i = minColumn; i <= maxColumn; i++)
+                columnWidths.Add(i < sheetColumnWidths.Count
+                    ? sheetColumnWidths[i]
+                    : LayoutDefaults.ExcelColumnWidthPoints);
+
+            var connectors = new Dictionary<int, List<Connector>>();
+            foreach (var line in connectorLines)
+            {
+                var row = line.Row - minRow;
+                if (row < 0 || row >= rowCount) continue;
+                if (!connectors.TryGetValue(row, out var list)) connectors[row] = list = [];
+                var origin = SheetOffset(sheetColumnWidths, minColumn);
+                list.Add(new Connector(row,
+                    SheetOffset(sheetColumnWidths, line.FromCol) + line.FromOffsetPoints - origin,
+                    SheetOffset(sheetColumnWidths, line.ToCol) + line.ToOffsetPoints - origin));
+            }
+
+            var grid = new SheetGrid
+            {
+                MinRow = minRow,
+                MinColumn = minColumn,
+                RowCount = rowCount,
+                ColumnCount = columnCount,
+                Cells = cells,
+                RowHeights = rowHeights,
+                ClipsToHeight = clipsToHeight,
+                OriginalRowHeights = Enumerable.Range(0, rowCount)
+                    .Select(r => rowHeights[r] ?? LayoutDefaults.ExcelRowHeightPoints).ToArray(),
+                ColumnWidths = columnWidths,
+                SheetColumnWidths = sheetColumnWidths,
+                Merges = [],
+                CoveredByMerge = [],
+                SkipHorizontalMerge = [],
+                Connectors = connectors,
+                Images = images,
+                Styles = styles,
+            };
+
+            grid.IndexMerges(mergeRanges);
+            return grid;
+        }
+
+        void IndexMerges(List<(int startRow, int startCol, int endRow, int endCol)> ranges)
+        {
+            foreach (var range in ranges)
+            {
+                var merge = new MergeRange(range.startRow - MinRow, range.startCol - MinColumn,
+                    range.endRow - MinRow, range.endCol - MinColumn);
+                Merges.Add(merge);
+
+                for (var column = merge.StartColumn + 1; column <= merge.EndColumn; column++)
+                    if (merge.StartRow >= 0 && merge.StartRow < RowCount && column >= 0 && column < ColumnCount)
+                        CoveredByMerge.Add((merge.StartRow, column));
+
+                if (WouldExtendBordersFromRowAbove(merge)) SkipHorizontalMerge.Add((merge.StartRow, merge.StartColumn));
+            }
+        }
+
+        // MigraDoc stretches a partial bottom border from the row above across a merged cell. When
+        // the row above has mixed borders the merge is skipped and centring simulated with an indent.
+        bool WouldExtendBordersFromRowAbove(MergeRange merge)
+        {
+            var span = Math.Min(merge.EndColumn, ColumnCount - 1) - merge.StartColumn;
+            if (span <= 0 || merge.StartRow <= 0 || merge.StartRow >= RowCount) return false;
+            if (merge.StartColumn < 0 || merge.StartColumn >= ColumnWidths.Count) return false;
+            if (ColumnWidths[merge.StartColumn] < 40) return false;
+
+            var anchor = Styles.GetCellStyle(CellAt(merge.StartRow, merge.StartColumn)?.StyleIndex?.Value);
+            if (anchor.Borders.TopWidth > 0) return false;
+
+            bool anyBorder = false, anyMissing = false;
+            for (var column = merge.StartColumn; column <= merge.StartColumn + span; column++)
+            {
+                var above = Styles.GetCellStyle(CellAt(merge.StartRow - 1, column)?.StyleIndex?.Value);
+                if (above.Borders.BottomWidth > 0) anyBorder = true;
+                else anyMissing = true;
+            }
+            return anyBorder && anyMissing;
+        }
+
+        public MergeRange? MergeAnchoredAt(int row, int column)
+        {
+            foreach (var merge in Merges)
+                if (merge.StartRow == row && merge.StartColumn == column) return merge;
+            return null;
+        }
+
+        public double MergeWidth(MergeRange merge)
+        {
+            double width = 0;
+            for (var column = merge.StartColumn; column <= merge.EndColumn && column < ColumnWidths.Count; column++)
+                width += ColumnWidths[column];
+            return width;
+        }
+
+        public void ScaleToWidth(double contentWidth)
+        {
+            var total = ColumnWidths.Sum();
+            if (total <= contentWidth || total <= 0) return;
+
+            var factor = contentWidth / total;
+            ScaleFactor = factor;
+            for (var i = 0; i < ColumnWidths.Count; i++) ColumnWidths[i] *= factor;
+        }
+
+        public void CollapseEmptyRows(ImagePlacement placement)
+        {
+            var mergedRows = new HashSet<int>();
+            foreach (var merge in Merges)
+                for (var row = merge.StartRow; row <= merge.EndRow; row++) mergedRows.Add(row);
+
+            for (var row = 0; row < RowCount; row++)
+            {
+                if (RowHeights[row] != null) continue;
+                if (mergedRows.Contains(row) || Connectors.ContainsKey(row) || placement.OccupiesRow(row)) continue;
+
+                var hasData = false;
+                for (var column = 0; column < ColumnCount && !hasData; column++)
+                    hasData = Cells[row, column] != null;
+
+                if (!hasData) RowHeights[row] = LayoutDefaults.ExcelEmptyRowHeightPoints;
+            }
+        }
+
+        public double RowOffset(int row)
+        {
+            double offset = 0;
+            for (var i = 0; i < row && i < RowCount; i++) offset += RowHeight(i);
+            return offset;
+        }
+    }
+
+    readonly record struct MergeRange(int StartRow, int StartColumn, int EndRow, int EndColumn);
+
+    readonly record struct Connector(int Row, double StartPoints, double EndPoints);
+
+    sealed class ImagePlacement
+    {
+        public Dictionary<int, List<(ExcelHelpers.ExcelImageInfo Info, string Path)>> ByRow { get; } = [];
+        public List<(ExcelHelpers.ExcelImageInfo Info, string Path, int Row)> Floating { get; } = [];
+
+        readonly HashSet<(int Row, string Path)> _floatingKeys = [];
+        readonly HashSet<int> _occupiedRows = [];
+
+        public bool OccupiesRow(int row) => _occupiedRows.Contains(row);
+
+        public bool IsFloating(int row, string path) => _floatingKeys.Contains((row, path));
+
+        public static ImagePlacement Build(SheetGrid sheet, TempImageStore images)
+        {
+            var placement = new ImagePlacement();
+            var placed = new List<(ExcelHelpers.ExcelImageInfo Info, string Path, int Row)>();
+
+            foreach (var info in sheet.Images)
+            {
+                var path = images.Save(info.Bytes);
+                if (path == null) continue;
+                var row = Math.Clamp((info.FromRow ?? 0) - sheet.MinRow, 0, sheet.RowCount - 1);
+                placed.Add((info, path, row));
+            }
+
+            MergeOverlappingRows(placed);
+
+            foreach (var (info, path, row) in placed)
+            {
+                if (!placement.ByRow.TryGetValue(row, out var list)) placement.ByRow[row] = list = [];
+                list.Add((info, path));
+                placement._occupiedRows.Add(row);
+
+                if (!IsInSpacerColumn(info, sheet)) continue;
+                for (var spanned = info.FromRow ?? 0; spanned < (info.ToRow ?? 0); spanned++)
+                {
+                    var offset = spanned - sheet.MinRow;
+                    if (offset >= 0 && offset < sheet.RowCount) placement._occupiedRows.Add(offset);
+                }
+            }
+
+            // A picture anchored left of the data shares its row with text; MigraDoc cannot let a
+            // cell picture overflow, so those are positioned absolutely instead.
+            foreach (var (row, entries) in placement.ByRow)
+            {
+                if (!sheet.RowHasText(row)) continue;
+                foreach (var (info, path) in entries)
+                {
+                    if (!IsInSpacerColumn(info, sheet)) continue;
+                    placement.Floating.Add((info, path, row));
+                    placement._floatingKeys.Add((row, path));
+                }
+            }
+
+            return placement;
+        }
+
+        static bool IsInSpacerColumn(ExcelHelpers.ExcelImageInfo info, SheetGrid sheet) =>
+            (info.FromCol ?? 0) < sheet.MinColumn;
+
+        static void MergeOverlappingRows(List<(ExcelHelpers.ExcelImageInfo Info, string Path, int Row)> placed)
+        {
+            for (var i = 0; i < placed.Count; i++)
+            {
+                for (var j = i + 1; j < placed.Count; j++)
+                {
+                    var (first, second) = (placed[i], placed[j]);
+                    if (first.Info.FromCol == second.Info.FromCol) continue;
+
+                    var firstEnd = first.Info.ToRow ?? (first.Info.FromRow ?? 0) + 1;
+                    var secondEnd = second.Info.ToRow ?? (second.Info.FromRow ?? 0) + 1;
+                    if ((first.Info.FromRow ?? 0) >= secondEnd || (second.Info.FromRow ?? 0) >= firstEnd) continue;
+
+                    var row = Math.Min(first.Row, second.Row);
+                    placed[i] = first with { Row = row };
+                    placed[j] = second with { Row = row };
                 }
             }
         }
+    }
 
-        // Build image lookup by row (using offset coordinates)
-        // Group images that overlap vertically into the same row for side-by-side rendering
-        var imagesByRow = new Dictionary<int, List<(ExcelHelpers.ExcelImageInfo info, string path)>>();
-        var processedImages = new List<(ExcelHelpers.ExcelImageInfo info, string path, int assignedRow)>();
-        foreach (var imgInfo in imageInfos)
+    static void RenderRow(Table table, SheetGrid sheet, ExcelStyles styles, ImagePlacement placement, int rowIndex)
+    {
+        var row = table.AddRow();
+        row.Height = Unit.FromPoint(sheet.RowHeight(rowIndex));
+        // Excel clips a row given an explicit height; MigraDoc would grow it to fit instead.
+        if (sheet.ClipsToHeight[rowIndex]) row.HeightRule = RowHeightRule.Exactly;
+
+        if (sheet.Connectors.TryGetValue(rowIndex, out var connectors))
+            foreach (var connector in connectors)
+                AddConnectorLine(sheet, row, connector);
+
+        for (var column = 0; column < sheet.ColumnCount; column++)
         {
-            if (imgInfo.Bytes == null || imgInfo.Bytes.Length == 0) continue;
-            int imgRow = (imgInfo.FromRow ?? 0) - minDataRow;
-            if (imgRow < 0) imgRow = 0;
-            if (imgRow >= numRows) imgRow = numRows - 1;
-            
-            var imgPath = ConverterExtensions.SaveTempImage(imgInfo.Bytes);
-            tempFiles?.Add(imgPath);
-            processedImages.Add((imgInfo, imgPath, imgRow));
-        }
-        
-        // Check for images in different columns that overlap vertically — merge to earliest row
-        for (int i = 0; i < processedImages.Count; i++)
-        {
-            var (infoA, _, rowA) = processedImages[i];
-            int fromRowA = infoA.FromRow ?? 0;
-            int toRowA = infoA.ToRow ?? (fromRowA + 1);
-            for (int j = i + 1; j < processedImages.Count; j++)
+            var cell = sheet.CellAt(rowIndex, column);
+            var target = row.Cells[column];
+
+            if (sheet.CoveredByMerge.Contains((rowIndex, column)))
             {
-                var (infoB, pathB, rowB) = processedImages[j];
-                int fromRowB = infoB.FromRow ?? 0;
-                int toRowB = infoB.ToRow ?? (fromRowB + 1);
-                // Different columns, overlapping rows
-                if (infoA.FromCol != infoB.FromCol && fromRowA < toRowB && fromRowB < toRowA)
-                {
-                    int mergedRow = Math.Min(rowA, rowB);
-                    processedImages[i] = (processedImages[i].info, processedImages[i].path, mergedRow);
-                    processedImages[j] = (processedImages[j].info, processedImages[j].path, mergedRow);
-                }
-            }
-        }
-        
-        foreach (var (info, path, row) in processedImages)
-        {
-            if (!imagesByRow.ContainsKey(row))
-                imagesByRow[row] = new List<(ExcelHelpers.ExcelImageInfo, string)>();
-            imagesByRow[row].Add((info, path));
-        }
-
-        // Collapse consecutive empty rows to minimal height.
-        // A row is "empty" if it has no cell data, no images, no connectors, and is not part of a merge.
-        var mergeRowSet = new HashSet<int>();
-        foreach (var mr in offsetMerges)
-            for (int rr = mr.startRow; rr <= mr.endRow; rr++) mergeRowSet.Add(rr);
-
-        // Protect the row where each image renders from collapsing.
-        // For spacer images (before data range), also protect their full span rows
-        // since they'll be rendered as floating images and need the vertical space.
-        var imageSpanRows = new HashSet<int>();
-        foreach (var (info, path, assignedRow) in processedImages)
-        {
-            imageSpanRows.Add(assignedRow);
-            // Protect full span for spacer images
-            if ((info.FromCol ?? 0) < minDataCol && info.FromRow.HasValue && info.ToRow.HasValue)
-            {
-                for (int sr = info.FromRow.Value; sr < info.ToRow.Value; sr++)
-                {
-                    int rOff = sr - minDataRow;
-                    if (rOff >= 0 && rOff < numRows)
-                        imageSpanRows.Add(rOff);
-                }
-            }
-        }
-
-        // Save original row heights before collapsing (for image span calculations)
-        var originalRowHeights = new double?[numRows];
-        Array.Copy(rowHeights, originalRowHeights, numRows);
-
-        for (int r = 0; r < numRows; r++)
-        {
-            if (imagesByRow.ContainsKey(r) || connectorsByRow.ContainsKey(r) 
-                || mergeRowSet.Contains(r) || imageSpanRows.Contains(r))
+                if (cell != null) ApplyCellBorders(target, styles.GetCellStyle(cell.StyleIndex?.Value).Borders);
                 continue;
-            bool hasData = false;
-            for (int c = 0; c < numCols; c++)
-            {
-                if (cellMatrix[r, c] != null) { hasData = true; break; }
             }
-            if (!hasData && rowHeights[r] == null)
-                rowHeights[r] = 6.0; // collapse to 6pt (minimal spacer, preserves some spacing)
+
+            var style = styles.GetCellStyle(cell?.StyleIndex?.Value);
+            var text = cell == null ? string.Empty : ReadCellValue(cell, styles);
+
+            ApplyCellStyle(target, style);
+            ApplyHorizontalMerge(sheet, target, rowIndex, column);
+            AddCellImages(sheet, placement, target, rowIndex, column, text.Length > 0);
+            AddCellText(sheet, target, style, text, rowIndex, column);
         }
 
-        // Identify spacer images that share their row with text — these will be
-        // rendered as absolutely positioned section-level images so they don't
-        // expand the row height (MigraDoc can't overflow images like Excel does).
-        var floatingImages = new List<(ExcelHelpers.ExcelImageInfo info, string path, int row)>();
-        var floatingImageSet = new HashSet<(int row, string path)>();
-        foreach (var kvp in imagesByRow)
+    }
+
+    // A negative right indent stretches the rule past its starting cell, because two connectors
+    // often share a column at different offsets, which merged cells cannot express.
+    static void AddConnectorLine(SheetGrid sheet, Row row, Connector connector)
+    {
+        var start = Math.Max(connector.StartPoints * sheet.ScaleFactor, 0);
+        var end = Math.Min(connector.EndPoints * sheet.ScaleFactor, sheet.TableWidth);
+        if (end <= start) return;
+
+        var host = sheet.ColumnAt(start);
+        var indent = start - sheet.ColumnOffset(host);
+
+        var paragraph = row.Cells[host].AddParagraph();
+        paragraph.Format.Font.Size = 1;
+        paragraph.Format.SpaceBefore = 0;
+        paragraph.Format.SpaceAfter = 0;
+        paragraph.Format.LeftIndent = Unit.FromPoint(Math.Max(indent, 0));
+        paragraph.Format.RightIndent = Unit.FromPoint(sheet.ColumnWidths[host] - indent - (end - start));
+        paragraph.Format.Borders.Bottom.Width = Unit.FromPoint(LayoutDefaults.BorderWidthPoints);
+        paragraph.Format.Borders.Bottom.Color = Colors.Black;
+    }
+
+    static void ApplyCellStyle(Cell target, ExcelCellStyleInfo style)
+    {
+        if (ColorUtils.TryParse(style.FillColor, out var fill)) target.Shading.Color = fill;
+
+        if (!string.IsNullOrEmpty(style.HorizontalAlignment))
+            target.Format.Alignment = style.HorizontalAlignment.ToLowerInvariant() switch
+            {
+                "center" or "centercontinuous" => ParagraphAlignment.Center,
+                "right" => ParagraphAlignment.Right,
+                "justify" or "distributed" => ParagraphAlignment.Justify,
+                _ => ParagraphAlignment.Left,
+            };
+
+        if (!string.IsNullOrEmpty(style.VerticalAlignment))
+            target.VerticalAlignment = style.VerticalAlignment.ToLowerInvariant() switch
+            {
+                "center" => VerticalAlignment.Center,
+                "bottom" => VerticalAlignment.Bottom,
+                _ => VerticalAlignment.Top,
+            };
+
+        ApplyCellBorders(target, style.Borders);
+    }
+
+    static void ApplyHorizontalMerge(SheetGrid sheet, Cell target, int row, int column)
+    {
+        if (sheet.MergeAnchoredAt(row, column) is not { } merge) return;
+
+        var span = Math.Min(merge.EndColumn - merge.StartColumn, sheet.ColumnCount - 1 - column);
+        if (span <= 0) return;
+
+        if (!sheet.SkipHorizontalMerge.Contains((row, column)))
         {
-            int imgR = kvp.Key;
-            bool hasSpacerImg = false;
-            foreach (var (imgInf, _) in kvp.Value)
-                if ((imgInf.FromCol ?? 0) < minDataCol) { hasSpacerImg = true; break; }
-            if (!hasSpacerImg) continue;
-            bool hasRowText = false;
-            for (int tc = 0; tc < numCols; tc++)
-            {
-                var tcCell = cellMatrix[imgR, tc];
-                if (tcCell != null && !string.IsNullOrEmpty(GetCellValue(tcCell, wbPart)))
-                { hasRowText = true; break; }
-            }
-            if (!hasRowText) continue;
-            foreach (var (imgInf, imgPath) in kvp.Value)
-            {
-                if ((imgInf.FromCol ?? 0) < minDataCol)
-                {
-                    floatingImages.Add((imgInf, imgPath, imgR));
-                    floatingImageSet.Add((imgR, imgPath));
-                }
-            }
+            target.MergeRight = span;
+            return;
         }
 
-        // Track cumulative Y offset per row (for positioning floating images later)
-        var rowYOffsets = new double[numRows];
-        double cumulativeY = 0;
-        for (int ri = 0; ri < numRows; ri++)
+        var mergeWidth = sheet.MergeWidth(merge);
+        var anchorWidth = sheet.ColumnWidths[column];
+        if (target.Format.Alignment == ParagraphAlignment.Center && mergeWidth > anchorWidth)
+            target.Format.LeftIndent = Unit.FromPoint(mergeWidth - anchorWidth);
+    }
+
+    static void AddCellImages(SheetGrid sheet, ImagePlacement placement, Cell target,
+        int row, int column, bool cellHasText)
+    {
+        if (!placement.ByRow.TryGetValue(row, out var entries)) return;
+
+        var actualColumn = column + sheet.MinColumn;
+        var merge = sheet.MergeAnchoredAt(row, column);
+        var mergeEndColumn = merge is { } m && m.EndColumn > m.StartColumn
+            ? m.EndColumn + sheet.MinColumn
+            : actualColumn;
+
+        foreach (var (info, path) in entries)
         {
-            rowYOffsets[ri] = cumulativeY;
-            cumulativeY += rowHeights[ri] ?? 14.5;
-        }
+            if (placement.IsFloating(row, path)) continue;
 
-        for (int r = 0; r < numRows; r++)
-        {
-            // If this row has both connectors and text data, render connectors in a separate row first
-            bool hasConnectors = connectorsByRow.ContainsKey(r);
-            bool hasTextData = false;
-            if (hasConnectors)
-            {
-                for (int tc = 0; tc < numCols; tc++)
-                {
-                    var tcCell = cellMatrix[r, tc];
-                    if (tcCell != null && !string.IsNullOrEmpty(GetCellValue(tcCell, wbPart)))
-                    { hasTextData = true; break; }
-                }
-            }
-            
-            if (hasConnectors && hasTextData)
-            {
-                // Add a dedicated row for connector underscore lines
-                var connRow = table.AddRow();
-                connRow.Height = Unit.FromPoint(14);
-                foreach (var (cFrom, cTo) in connectorsByRow[r])
-                {
-                    if (cFrom >= 0 && cFrom < numCols)
-                    {
-                        var connCell = connRow.Cells[cFrom];
-                        double lineW = colWidths[cFrom] * scaleFactor;
-                        // Use ~65% of cell width so the two lines are clearly separate
-                        int underscoreCount = Math.Max(1, (int)(lineW * 0.65 / 4.5));
-                        var linePara = connCell.AddParagraph();
-                        var lineText = linePara.AddFormattedText(new string('_', underscoreCount));
-                        lineText.Size = 10;
-                        linePara.Format.Alignment = ParagraphAlignment.Center;
-                    }
-                }
-            }
+            var imageColumn = info.FromCol ?? 0;
+            var fromSpacer = imageColumn < sheet.MinColumn && column == 0;
+            var matches = imageColumn == actualColumn || fromSpacer
+                || (imageColumn > actualColumn && imageColumn <= mergeEndColumn);
+            if (!matches) continue;
 
-            var prow = table.AddRow();
-            
-            // Apply row height
-            double effectiveRowHeight = rowHeights[r] ?? 14.5;
-            
-            prow.Height = Unit.FromPoint(effectiveRowHeight);
-            
-            for (int c = 0; c < numCols; c++)
-            {
-                bool isMergedAway = mergedCells.Contains((r, c));
-                
-                var cell = cellMatrix[r, c];
-                var target = prow.Cells[c];
-                
-                // For merged-away cells, only apply borders (skip content/alignment/images)
-                if (isMergedAway)
-                {
-                    if (cell != null)
-                    {
-                        var mergedStyle = ExcelHelpers.GetCellStyleInfo(wbPart, cell.StyleIndex?.Value);
-                        ApplyCellBorders(target, mergedStyle.Borders);
-                    }
-                    continue;
-                }
-                
-                string text = "";
-                uint? styleIndex = null;
-                
-                if (cell != null)
-                {
-                    text = GetCellValue(cell, wbPart);
-                    styleIndex = cell.StyleIndex?.Value;
-                }
+            var start = fromSpacer
+                ? 0
+                : sheet.SheetStart(imageColumn, info.FromColumnOffsetPoints) * sheet.ScaleFactor;
+            var indent = Math.Max(start - sheet.ColumnOffset(column), 0);
+            var maxWidth = Math.Max(10, sheet.TableWidth - Math.Max(start, 0));
+            var maxHeight = cellHasText ? sheet.RowHeight(row) : SpannedHeight(sheet, info, row);
 
-                var cellStyle = ExcelHelpers.GetCellStyleInfo(wbPart, styleIndex);
+            var paragraph = target.AddParagraph();
+            if (indent > 0) paragraph.Format.LeftIndent = Unit.FromPoint(indent);
 
-                if (!string.IsNullOrEmpty(cellStyle.FillColor))
-                {
-                    try { target.Shading.Color = MigraDoc.DocumentObjectModel.Color.Parse(cellStyle.FillColor); } catch { }
-                }
-
-                if (!string.IsNullOrEmpty(cellStyle.HorizontalAlignment))
-                {
-                    target.Format.Alignment = cellStyle.HorizontalAlignment.ToLowerInvariant() switch
-                    {
-                        "center" => ParagraphAlignment.Center,
-                        "right" => ParagraphAlignment.Right,
-                        "justify" => ParagraphAlignment.Justify,
-                        _ => ParagraphAlignment.Left
-                    };
-                }
-
-                if (!string.IsNullOrEmpty(cellStyle.VerticalAlignment))
-                {
-                    target.VerticalAlignment = cellStyle.VerticalAlignment.ToLowerInvariant() switch
-                    {
-                        "center" => VerticalAlignment.Center,
-                        "bottom" => VerticalAlignment.Bottom,
-                        _ => VerticalAlignment.Top
-                    };
-                }
-
-                ApplyCellBorders(target, cellStyle.Borders);
-
-                // Check for merge (MergeRight only, MergeDown avoided)
-                foreach (var mrItem in offsetMerges)
-                {
-                    if (r == mrItem.startRow && c == mrItem.startCol)
-                    {
-                        var colSpan = Math.Min(mrItem.endCol - mrItem.startCol, numCols - 1 - c);
-                        if (colSpan > 0)
-                        {
-                            if (borderExtensionMerges.Contains((r, c)))
-                            {
-                                // Skip MergeRight to prevent MigraDoc border extension.
-                                // Simulate centering by computing the full merge width
-                                // and applying a left indent to the anchor cell.
-                                // With Center alignment, MigraDoc centers text within
-                                // (cellWidth - leftIndent), so to center across the
-                                // full merge: leftIndent = mergeWidth - anchorWidth
-                                double mergeWidth = 0;
-                                for (int mc = c; mc <= c + colSpan && mc < colWidths.Count; mc++)
-                                    mergeWidth += colWidths[mc] * scaleFactor;
-                                double anchorWidth = colWidths[c] * scaleFactor;
-                                if (target.Format.Alignment == ParagraphAlignment.Center && mergeWidth > anchorWidth)
-                                    target.Format.LeftIndent = Unit.FromPoint(mergeWidth - anchorWidth);
-                            }
-                            else
-                            {
-                                target.MergeRight = colSpan;
-                            }
-                        }
-                        break;
-                    }
-                }
-
-                // Add image if one is anchored to this cell (or within its merge range)
-                if (imagesByRow.TryGetValue(r, out var imgs))
-                {
-                    int actualCol = c + minDataCol;
-                    // Determine merge range end column for this cell (if it's a merge anchor)
-                    int mergeEndActualCol = actualCol;
-                    foreach (var mrItem in offsetMerges)
-                    {
-                        if (r == mrItem.startRow && c == mrItem.startCol && mrItem.endCol > mrItem.startCol)
-                        {
-                            mergeEndActualCol = mrItem.endCol + minDataCol;
-                            break;
-                        }
-                    }
-                    foreach (var (imgInf, imgPath) in imgs)
-                    {
-                        int imgFromCol = imgInf.FromCol ?? 0;
-                        // Images from before the data range go to column 0
-                        bool fromSpacer = imgFromCol < minDataCol && c == 0;
-                        // Skip images that will be rendered as floating (absolute positioned)
-                        if (floatingImageSet.Contains((r, imgPath))) continue;
-                        // Match if image column equals this cell's column OR falls within its merge range
-                        bool match = (imgFromCol == actualCol) || fromSpacer
-                            || (imgFromCol > actualCol && imgFromCol <= mergeEndActualCol);
-                        if (match && System.IO.File.Exists(imgPath))
-                        {
-                            try
-                            {
-                                // Calculate max width for the image
-                                double maxImgW;
-                                if (fromSpacer)
-                                {
-                                    // Spacer-column images: use full table width
-                                    maxImgW = actualTableWidth;
-                                }
-                                else
-                                {
-                                    // Cell-anchored images: use cell/merged width
-                                    maxImgW = colWidths[c] * scaleFactor;
-                                    foreach (var mrItem in offsetMerges)
-                                    {
-                                        if (r == mrItem.startRow && c == mrItem.startCol && mrItem.endCol > mrItem.startCol)
-                                        {
-                                            maxImgW = 0;
-                                            for (int mc = mrItem.startCol; mc <= mrItem.endCol && mc < colWidths.Count; mc++)
-                                                maxImgW += colWidths[mc] * scaleFactor;
-                                            break;
-                                        }
-                                    }
-                                    maxImgW = Math.Min(maxImgW, actualTableWidth);
-                                    // When multiple images share a row, reduce width and add
-                                    // left indent on non-first images for visual separation
-                                    if (imgs.Count > 1)
-                                        maxImgW = Math.Max(10, maxImgW - 12);
-                                }
-
-                                var imgPara = target.AddParagraph();
-                                // Shift non-first images right for spacing in multi-image rows
-                                if (imgs.Count > 1 && c > 0)
-                                    imgPara.Format.LeftIndent = Unit.FromPoint(12);
-                                var image = imgPara.AddImage(imgPath);
-                                
-                                // Calculate row span height for this image using original row heights
-                                double imgRowSpanHeight = effectiveRowHeight;
-                                if (imgInf.ToRow.HasValue && imgInf.FromRow.HasValue)
-                                {
-                                    imgRowSpanHeight = 0;
-                                    for (int sr = imgInf.FromRow.Value; sr < imgInf.ToRow.Value; sr++)
-                                    {
-                                        int rOff = sr - minDataRow;
-                                        if (rOff >= 0 && rOff < numRows)
-                                            imgRowSpanHeight += originalRowHeights[rOff] ?? 14.5;
-                                        else
-                                            imgRowSpanHeight += 14.5;
-                                    }
-                                }
-                                if (imgRowSpanHeight <= 0) imgRowSpanHeight = effectiveRowHeight;
-
-                                // When the image's cell has text, clamp to single row height
-                                bool cellHasText = !string.IsNullOrEmpty(text);
-                                image.LockAspectRatio = false;
-                                double maxImgH = cellHasText ? effectiveRowHeight : imgRowSpanHeight;
-                                if (imgInf.WidthEmu.HasValue && imgInf.WidthEmu.Value > 0)
-                                {
-                                    double widthPts = imgInf.WidthEmu.Value / 12700.0;
-                                    image.Width = Unit.FromPoint(Math.Min(widthPts, maxImgW));
-                                    double heightPts = imgInf.HeightEmu.HasValue && imgInf.HeightEmu.Value > 0
-                                        ? imgInf.HeightEmu.Value / 12700.0
-                                        : maxImgH;
-                                    image.Height = Unit.FromPoint(Math.Min(heightPts, maxImgH));
-                                }
-                                else if (imgInf.ToCol.HasValue && imgInf.FromCol.HasValue)
-                                {
-                                    // Zero extent: calculate size from anchor col/row span
-                                    double spanW = 0;
-                                    for (int sc = imgInf.FromCol.Value; sc < imgInf.ToCol.Value && sc < allColWidths.Count; sc++)
-                                        spanW += allColWidths[sc];
-                                    if (spanW <= 0) spanW = colWidths[c] * scaleFactor;
-                                    image.Width = Unit.FromPoint(Math.Min(spanW, maxImgW));
-                                    image.Height = Unit.FromPoint(maxImgH);
-                                }
-                                else
-                                {
-                                    double defaultW = Math.Min(colWidths[c] * scaleFactor, Unit.FromCentimeter(8).Point);
-                                    image.Width = Unit.FromPoint(defaultW);
-                                    image.Height = Unit.FromPoint(maxImgH);
-                                }
-                            }
-                            catch { }
-                        }
-                    }
-                }
-
-                var para = target.AddParagraph();
-
-                // Propagate cell alignment to the paragraph explicitly.
-                // When connectors were split into a dedicated row above, center the
-                // text paragraph so "Firma" aligns under the centered underscore lines.
-                bool isConnectorCol = false;
-                if (hasConnectors && hasTextData)
-                    foreach (var (cF, _) in connectorsByRow[r])
-                        if (cF == c) { isConnectorCol = true; break; }
-                para.Format.Alignment = isConnectorCol ? ParagraphAlignment.Center : target.Format.Alignment;
-
-                // Render connector lines inline only when there's no text in this row
-                // (otherwise they were already rendered in a dedicated row above)
-                if (!hasTextData && connectorsByRow.TryGetValue(r, out var connectors))
-                {
-                    foreach (var (cFrom, cTo) in connectors)
-                    {
-                        // Only render in the starting cell of each connector's range
-                        if (c == cFrom)
-                        {
-                            // Use only the starting cell's width for the underscores
-                            double lineW = colWidths[c] * scaleFactor;
-                            int underscoreCount = Math.Max(1, (int)(lineW / 4.5));
-                            var linePara = target.AddParagraph();
-                            var lineText = linePara.AddFormattedText(new string('_', underscoreCount));
-                            lineText.Size = 10;
-                            linePara.Format.Alignment = ParagraphAlignment.Center;
-                            break;
-                        }
-                    }
-                }
-
-                if (!string.IsNullOrEmpty(text))
-                {
-                    var formatted = para.AddFormattedText(text);
-                    double fsize = cellStyle.FontSize ?? 10;
-                    formatted.Size = fsize;
-                    if (!string.IsNullOrEmpty(cellStyle.FontFamily))
-                    {
-                        try { formatted.Font.Name = cellStyle.FontFamily; } catch { }
-                    }
-                    if (!string.IsNullOrEmpty(cellStyle.FontColor))
-                    {
-                        try { formatted.Color = MigraDoc.DocumentObjectModel.Color.Parse("#" + cellStyle.FontColor); } catch { }
-                    }
-                    if (cellStyle.Bold) formatted.Bold = true;
-                    if (cellStyle.Italic) formatted.Italic = true;
-                }
-                else
-                {
-                    para.Format.Font.Size = 1;
-                    para.Format.SpaceBefore = 0;
-                    para.Format.SpaceAfter = 0;
-                    para.Format.LineSpacing = Unit.FromPoint(1);
-                }
-            }
-        }
-
-        // Render floating images (spacer images that share rows with text)
-        // as absolutely positioned section-level images
-        double tableIndent = 0;
-        if (actualTableWidth < pageContentWidth)
-            tableIndent = (pageContentWidth - actualTableWidth) / 2;
-        double topMargin = section.PageSetup.TopMargin.Point;
-        double leftMargin = section.PageSetup.LeftMargin.Point;
-
-        foreach (var (fImgInf, fImgPath, fRow) in floatingImages)
-        {
-            if (!System.IO.File.Exists(fImgPath)) continue;
-            try
-            {
-                // Calculate image dimensions — prefer EMU extents if available
-                double fImgH;
-                if (fImgInf.HeightEmu.HasValue && fImgInf.HeightEmu.Value > 0)
-                {
-                    fImgH = fImgInf.HeightEmu.Value / 12700.0;
-                }
-                else
-                {
-                    fImgH = rowHeights[fRow] ?? 14.5;
-                    if (fImgInf.ToRow.HasValue && fImgInf.FromRow.HasValue)
-                    {
-                        fImgH = 0;
-                        for (int sr = fImgInf.FromRow.Value; sr < fImgInf.ToRow.Value; sr++)
-                        {
-                            int rOff = sr - minDataRow;
-                            fImgH += (rOff >= 0 && rOff < numRows)
-                                ? originalRowHeights[rOff] ?? 14.5 : 14.5;
-                        }
-                    }
-                    if (fImgH <= 0) fImgH = 14.5;
-                }
-
-                double fImgW;
-                if (fImgInf.WidthEmu.HasValue && fImgInf.WidthEmu.Value > 0)
-                {
-                    fImgW = fImgInf.WidthEmu.Value / 12700.0;
-                }
-                else
-                {
-                    fImgW = 0;
-                    if (fImgInf.ToCol.HasValue && fImgInf.FromCol.HasValue)
-                    {
-                        for (int sc = fImgInf.FromCol.Value; sc < fImgInf.ToCol.Value && sc < allColWidths.Count; sc++)
-                            fImgW += allColWidths[sc];
-                    }
-                    if (fImgW <= 0) fImgW = 80;
-                }
-
-                // X position: align to the left edge of the table (column 0)
-                double imgX = leftMargin + tableIndent;
-
-                // Y position: top margin + cumulative row heights up to this row
-                // Account for any connector rows added before this row
-                double imgY = topMargin + rowYOffsets[fRow];
-
-                var floatImg = section.AddImage(fImgPath);
-                floatImg.Width = Unit.FromPoint(fImgW);
-                floatImg.Height = Unit.FromPoint(fImgH);
-                floatImg.LockAspectRatio = false;
-                floatImg.RelativeVertical = MigraDoc.DocumentObjectModel.Shapes.RelativeVertical.Page;
-                floatImg.RelativeHorizontal = MigraDoc.DocumentObjectModel.Shapes.RelativeHorizontal.Page;
-                floatImg.Top = MigraDoc.DocumentObjectModel.Shapes.TopPosition.Parse(imgY.ToString("F1") + "pt");
-                floatImg.Left = MigraDoc.DocumentObjectModel.Shapes.LeftPosition.Parse(imgX.ToString("F1") + "pt");
-                floatImg.WrapFormat.Style = MigraDoc.DocumentObjectModel.Shapes.WrapStyle.None;
-            }
-            catch { }
+            var image = paragraph.AddImage(path);
+            image.LockAspectRatio = false;
+            image.Width = Unit.FromPoint(Math.Min(ImageWidth(sheet, info, column), maxWidth));
+            image.Height = Unit.FromPoint(Math.Min(ImageHeight(info, maxHeight), maxHeight));
         }
     }
 
-    private static void ApplyCellBorders(Cell target, BorderInfo borders)
+    static double ImageWidth(SheetGrid sheet, ExcelHelpers.ExcelImageInfo info, int column)
     {
-        try
+        if (info.WidthEmu is > 0) return Units.EmuToPoints(info.WidthEmu.Value);
+
+        if (info.FromCol is { } from && info.ToCol is { } to)
         {
-            if (borders.TopWidth > 0)
-            {
-                target.Borders.Top.Width = Unit.FromPoint(borders.TopWidth);
-                if (!string.IsNullOrEmpty(borders.TopColor))
-                    target.Borders.Top.Color = MigraDoc.DocumentObjectModel.Color.Parse(borders.TopColor);
-            }
-
-            if (borders.BottomWidth > 0)
-            {
-                target.Borders.Bottom.Width = Unit.FromPoint(borders.BottomWidth);
-                if (!string.IsNullOrEmpty(borders.BottomColor))
-                    target.Borders.Bottom.Color = MigraDoc.DocumentObjectModel.Color.Parse(borders.BottomColor);
-            }
-
-            if (borders.LeftWidth > 0)
-            {
-                target.Borders.Left.Width = Unit.FromPoint(borders.LeftWidth);
-                if (!string.IsNullOrEmpty(borders.LeftColor))
-                    target.Borders.Left.Color = MigraDoc.DocumentObjectModel.Color.Parse(borders.LeftColor);
-            }
-
-            if (borders.RightWidth > 0)
-            {
-                target.Borders.Right.Width = Unit.FromPoint(borders.RightWidth);
-                if (!string.IsNullOrEmpty(borders.RightColor))
-                    target.Borders.Right.Color = MigraDoc.DocumentObjectModel.Color.Parse(borders.RightColor);
-            }
+            double width = 0;
+            for (var i = from; i < to && i < sheet.SheetColumnWidths.Count; i++) width += sheet.SheetColumnWidths[i];
+            if (width > 0) return width;
         }
-        catch { }
+
+        return column < sheet.ColumnWidths.Count
+            ? Math.Min(sheet.ColumnWidths[column], Unit.FromCentimeter(LayoutDefaults.ExcelImageWidthCentimeters).Point)
+            : LayoutDefaults.ExcelColumnWidthPoints;
     }
 
-    private static int GetColumnIndex(string? cellRef)
+    static double ImageHeight(ExcelHelpers.ExcelImageInfo info, double fallback) =>
+        info.HeightEmu is > 0 ? Units.EmuToPoints(info.HeightEmu.Value) : fallback;
+
+    static double SpannedHeight(SheetGrid sheet, ExcelHelpers.ExcelImageInfo info, int row)
     {
-        if (string.IsNullOrEmpty(cellRef)) return 0;
-        var letters = new string(cellRef.TakeWhile(char.IsLetter).ToArray());
-        int index = 0;
-        foreach (char c in letters.ToUpperInvariant())
+        if (info.FromRow is not { } from || info.ToRow is not { } to || to <= from) return sheet.RowHeight(row);
+
+        double height = 0;
+        for (var i = from; i < to; i++)
         {
-            index = index * 26 + (c - 'A' + 1);
+            var offset = i - sheet.MinRow;
+            height += offset >= 0 && offset < sheet.RowCount
+                ? sheet.OriginalRowHeights[offset]
+                : LayoutDefaults.ExcelRowHeightPoints;
         }
-        return index - 1;
+        return height > 0 ? height : sheet.RowHeight(row);
     }
 
-    private static string GetCellValue(S.Cell cell, WorkbookPart wbPart)
+    static void AddCellText(SheetGrid sheet, Cell target, ExcelCellStyleInfo style, string text,
+        int row, int column)
     {
-        // Handle inline strings first
-        if (cell.DataType != null && cell.DataType == S.CellValues.InlineString)
-            return cell.InlineString?.Text?.Text ?? cell.InnerText ?? string.Empty;
-        
-        // Shared strings
-        if (cell.DataType != null && cell.DataType == S.CellValues.SharedString)
+        var fontSize = style.FontSize ?? LayoutDefaults.ExcelFontSizePoints;
+        if (sheet.HidesText(row, fontSize)) text = string.Empty;
+
+        var paragraph = target.AddParagraph();
+        paragraph.Format.Alignment = target.Format.Alignment;
+
+        if (text.Length == 0)
         {
-            var rawRef = cell.CellValue?.Text ?? cell.InnerText;
-            if (int.TryParse(rawRef, out var si))
-            {
-                var sst = wbPart.GetPartsOfType<SharedStringTablePart>().FirstOrDefault();
-                if (sst != null)
-                {
-                    var items = sst.SharedStringTable.Elements<S.SharedStringItem>().ToList();
-                    if (si < items.Count)
-                        return items[si].InnerText;
-                }
-            }
-            return rawRef ?? string.Empty;
-        }
-        
-        // Boolean
-        if (cell.DataType != null && cell.DataType == S.CellValues.Boolean)
-        {
-            var raw = cell.CellValue?.Text ?? cell.InnerText ?? string.Empty;
-            return raw == "0" ? "FALSE" : "TRUE";
-        }
-        
-        // Formula: prefer cached value
-        if (cell.CellFormula != null)
-        {
-            var cached = cell.CellValue?.Text;
-            if (!string.IsNullOrEmpty(cached))
-            {
-                // Format the cached value
-                var styleIndex = cell.StyleIndex?.Value;
-                var styleInfo = ExcelHelpers.GetCellStyleInfo(wbPart, styleIndex);
-                var numFmtId = styleInfo.NumberFormatId;
-                var fmt = ExcelHelpers.GetNumberFormatString(wbPart, numFmtId);
-                
-                if (!string.IsNullOrEmpty(fmt) && double.TryParse(cached, out var d))
-                {
-                    return FormatNumber(d, fmt);
-                }
-                return cached;
-            }
-            return ""; // Don't show _formula_ - just empty
+            paragraph.Format.Font.Size = 1;
+            paragraph.Format.SpaceBefore = 0;
+            paragraph.Format.SpaceAfter = 0;
+            paragraph.Format.LineSpacing = Unit.FromPoint(1);
+            return;
         }
 
-        var rawValue = cell.CellValue?.Text ?? cell.InnerText ?? string.Empty;
-
-        // Apply number formatting
-        var cellStyleIndex = cell.StyleIndex?.Value;
-        var cellStyleInfo = ExcelHelpers.GetCellStyleInfo(wbPart, cellStyleIndex);
-        var formatId = cellStyleInfo.NumberFormatId;
-        var format = ExcelHelpers.GetNumberFormatString(wbPart, formatId);
-
-        if (!string.IsNullOrEmpty(format) && double.TryParse(rawValue, out var num))
-        {
-            return FormatNumber(num, format);
-        }
-
-        return rawValue;
+        var formatted = paragraph.AddFormattedText(text);
+        formatted.Size = fontSize;
+        if (!string.IsNullOrEmpty(style.FontFamily)) formatted.Font.Name = style.FontFamily;
+        if (ColorUtils.TryParse(style.FontColor, out var color)) formatted.Color = color;
+        if (style.Bold) formatted.Bold = true;
+        if (style.Italic) formatted.Italic = true;
     }
 
-    private static string FormatNumber(double value, string format)
+    static void RenderFloatingImages(Section section, SheetGrid sheet, ImagePlacement placement, double tableIndent)
     {
-        // Check for date-like format
-        if (format.IndexOf('M', StringComparison.OrdinalIgnoreCase) >= 0 || 
-            format.IndexOf('y', StringComparison.OrdinalIgnoreCase) >= 0 || 
-            format.IndexOf('d', StringComparison.OrdinalIgnoreCase) >= 0 || 
-            format.IndexOf('H', StringComparison.OrdinalIgnoreCase) >= 0)
+        foreach (var (info, path, row) in placement.Floating)
         {
             try
             {
-                var dt = DateTime.FromOADate(value);
-                return dt.ToString(format);
+                var image = section.AddImage(path);
+                image.LockAspectRatio = false;
+                image.Width = Unit.FromPoint(ImageWidth(sheet, info, 0));
+                image.Height = Unit.FromPoint(ImageHeight(info, SpannedHeight(sheet, info, row)));
+                image.RelativeHorizontal = RelativeHorizontal.Page;
+                image.RelativeVertical = RelativeVertical.Page;
+                image.Left = Unit.FromPoint(section.PageSetup.LeftMargin.Point + tableIndent);
+                image.Top = Unit.FromPoint(section.PageSetup.TopMargin.Point + sheet.RowOffset(row));
+                image.WrapFormat.Style = WrapStyle.None;
             }
-            catch { }
+            catch (Exception ex)
+            {
+                OpenXmlHelpers.ImageLoadLogger?.Invoke($"Failed placing floating image '{path}': {ex.Message}");
+            }
         }
-        
-        try 
-        { 
-            return value.ToString(format); 
-        } 
-        catch 
-        { 
-            return value.ToString(); 
-        }
+    }
+
+    static void ApplyCellBorders(Cell target, BorderInfo borders)
+    {
+        ApplyEdge(target.Borders.Top, borders.TopWidth, borders.TopColor);
+        ApplyEdge(target.Borders.Bottom, borders.BottomWidth, borders.BottomColor);
+        ApplyEdge(target.Borders.Left, borders.LeftWidth, borders.LeftColor);
+        ApplyEdge(target.Borders.Right, borders.RightWidth, borders.RightColor);
+    }
+
+    static void ApplyEdge(Border border, double width, string? colorValue)
+    {
+        if (width <= 0) return;
+        border.Width = Unit.FromPoint(width);
+        if (ColorUtils.TryParse(colorValue, out var color)) border.Color = color;
+    }
+
+    static string ReadCellValue(S.Cell cell, ExcelStyles styles)
+    {
+        var dataType = cell.DataType?.Value;
+
+        if (dataType == S.CellValues.InlineString)
+            return cell.InlineString?.Text?.Text ?? cell.InnerText;
+
+        if (dataType == S.CellValues.SharedString)
+            return ResolveSharedString(cell);
+
+        if (dataType == S.CellValues.Boolean)
+            return (cell.CellValue?.Text ?? cell.InnerText) == "0" ? "FALSE" : "TRUE";
+
+        if (dataType == S.CellValues.Error)
+            return cell.CellValue?.Text ?? cell.InnerText;
+
+        if (dataType == S.CellValues.String)
+            return cell.CellValue?.Text ?? cell.InnerText;
+
+        if (dataType == S.CellValues.Date)
+            return cell.CellValue?.Text ?? cell.InnerText;
+
+        var raw = cell.CellValue?.Text;
+        if (string.IsNullOrEmpty(raw)) return cell.CellFormula != null ? string.Empty : cell.InnerText;
+
+        var numberFormat = styles.GetNumberFormat(styles.GetCellStyle(cell.StyleIndex?.Value).NumberFormatId);
+        if (!string.IsNullOrEmpty(numberFormat)) return ExcelNumberFormat.Apply(raw, numberFormat);
+
+        return Units.TryParseDouble(raw, out var number) ? GeneralFormat(number) : raw;
+    }
+
+    // Excel's "General" format carries at most 11 significant digits, so a value stored as
+    // 4.099999999998545 displays as 4.1 rather than exposing its binary-rounding tail.
+    const int GeneralSignificantDigits = 11;
+
+    static string GeneralFormat(double value)
+    {
+        var culture = System.Globalization.CultureInfo.CurrentCulture;
+        if (value == 0 || double.IsNaN(value) || double.IsInfinity(value))
+            return value.ToString(culture);
+
+        var decimals = GeneralSignificantDigits - 1 - (int)Math.Floor(Math.Log10(Math.Abs(value)));
+        if (decimals is < 0 or > 15) return value.ToString("G15", culture);
+
+        return Math.Round(value, decimals).ToString("G15", culture);
+    }
+
+    static string ResolveSharedString(S.Cell cell)
+    {
+        var raw = cell.CellValue?.Text ?? cell.InnerText;
+        if (!Units.TryParseInt(raw, out var index)) return raw;
+
+        var workbookPart = cell.Ancestors<S.Worksheet>().FirstOrDefault()?.WorksheetPart
+            ?.GetParentParts().OfType<WorkbookPart>().FirstOrDefault();
+        var table = workbookPart?.SharedStringTablePart?.SharedStringTable;
+        if (table == null) return raw;
+
+        var item = table.Elements<S.SharedStringItem>().ElementAtOrDefault(index);
+        return item?.InnerText ?? raw;
     }
 }

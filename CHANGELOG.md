@@ -2,6 +2,43 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.0] - 2026-09-14
+
+### Added
+- DOCX: `PAGE` and `NUMPAGES` fields, manual page breaks and `w:pageBreakBefore`
+- DOCX: bullet glyphs, multi-level list labels (`%1.%2`) and `w:lvlOverride`
+- DOCX: superscript/subscript, all caps, underline styles, paragraph shading, bookmark links, `w:sym` and non-breaking hyphens
+- DOCX: header and footer text, with first-page and even-page variants kept separate
+- DOCX: DrawingML group shapes and straight-connector lines (the rules above signature blocks)
+- DOCX: table width (`w:tblW`), cell margins (`w:tblCellMar`), table indent and alignment, repeating header rows
+- XLSX: theme and indexed colours, `defaultColWidth`, error and date cell types
+- Images: BMP, TIFF, EMF and WMF are re-encoded so PdfSharp can embed them
+
+### Fixed
+- All: numbers were parsed with the current culture, so a locale using `,` as the decimal separator misread Excel values and OpenXML measurements
+- DOCX: `w:docDefaults` was never read — it parses as `*BaseStyle` types — so the document's default font, size and spacing were ignored, as was the paragraph mark's own size
+- DOCX: an explicit `w:b val="0"` was overridden by a style that enables bold, and likewise for italic and underline
+- DOCX: relationship ids resolved against the main part first, so a header or footer picture could pick up a different body image; an unresolvable id returned the first picture in the package
+- DOCX: table cell content lost document order — hyperlinks and content controls were appended after the surrounding text
+- DOCX: pictures were scaled from the image file's aspect ratio rather than the drawing's extent, and page art was stretched to the page rather than its declared size
+- DOCX: percentage column widths resolved against a placeholder width, and a word wider than its cell spilled into the next column
+- DOCX: background pictures were drawn twice, and a standalone image gained a phantom empty paragraph after it
+- DOCX: runs marked `xml:space="preserve"` lost their spacing; the first paragraph lost its `w:spacing w:before`
+- DOCX: square and tight wrapping reserved a full-width band, displacing far more text than Word does, and a picture anchored to the first block lost its vertical offset
+- XLSX: landscape sheets rendered as portrait, hidden sheets were rendered, and empty sheets produced blank pages
+- XLSX: number format codes were converted by chained string replace, turning minutes into months and emitting raw format codes for anything it could not handle
+- XLSX: unformatted numbers printed their full binary value (`4.099999999998545` rather than `4.1`)
+- XLSX: pictures and connector lines ignored their anchor's `colOff`, and cells carried MigraDoc's default padding instead of the width Excel declares
+- XLSX: text parked in a short spacer row was visible, where Excel clips a row given an explicit height
+- Fonts: every system font file was read into memory at startup; faces are now indexed by path and loaded on demand
+- Fonts: bold and italic are simulated for a family shipping only a regular face, and an unknown family falls back to a known text font rather than an arbitrary one
+- Images: a picture reused across a document is embedded once instead of once per occurrence
+- Tooling: `dotnet test` failed outright on the .NET 10 SDK, as xUnit v3 requires Microsoft.Testing.Platform; `global.json` now opts into it, so CI actually runs the suite
+
+### Changed
+- `OpenXmlHelpers` no longer forwards OpenXML parsing helpers; it keeps font registration and the diagnostic loggers. `Converters`, `DocxConverter`, `XlsxConverter` and `FontUtils` are unchanged
+- Tables are no longer scaled up to fill the page when narrower than half the content width; the declared table width is used instead
+
 ## [0.0.4] - 2026-04-04
 
 ### Added

@@ -77,7 +77,7 @@ OpenXmlHelpers.RegisterFontMappings(new Dictionary<string, string>
 | Tables with borders and shading | ✅ | ✅ |
 | Conditional table formatting (header row, banded rows) | ✅ | — |
 | Inline and floating images | ✅ | ✅ |
-| Connector shapes (signature lines) | — | ✅ |
+| Connector shapes (signature lines) | ✅ | ✅ |
 | Image cropping (srcRect) | ✅ | — |
 | Headers and footers | ✅ | — |
 | Hyperlinks | ✅ | — |
@@ -85,15 +85,17 @@ OpenXmlHelpers.RegisterFontMappings(new Dictionary<string, string>
 | Emoji | ✅ | — |
 | Tab stops | ✅ | — |
 | Merged cells | ✅ | ✅ |
-| Landscape orientation | ✅ | — |
+| Lists and numbering (bullets, multi-level) | ✅ | — |
+| Page number fields (PAGE, NUMPAGES) | ✅ | — |
+| Landscape orientation | ✅ | ✅ |
 
 ## Known Limitations
 
-- **Font substitution**: If a document uses fonts not installed on the system, PdfSharp falls back to a default font which may cause minor layout differences.
-- **EMF/WMF images**: Vector image formats are not supported by PdfSharp and will be skipped.
+- **Font substitution**: If a document uses fonts not installed on the system, the closest available family is used, which may cause minor layout differences.
+- **Character spacing**: MigraDoc has no letter-spacing, so `w:spacing` (condensed/expanded text) and `w:w` width scaling are ignored. Lines may wrap slightly differently from Word.
 - **Color emoji**: Only monochrome emoji glyphs (Noto Emoji) are rendered; color emoji (COLR/CPAL) is not supported.
-- **Image cropping**: `srcRect` cropping uses `System.Drawing.Bitmap` which is Windows-only. On other platforms, the uncropped image is used as a graceful fallback.
-- **Character width scaling**: The `w:w` attribute is not supported by MigraDoc.
+- **Windows-only image paths**: `srcRect` cropping and re-encoding of BMP/TIFF/EMF/WMF use `System.Drawing`, which is Windows-only. Elsewhere the original image is used as a graceful fallback.
+- **Text wrapping around images**: MigraDoc cannot flow text beside a shape, so square and tight wrapping render as floating images.
 - **Complex layouts**: Very complex Office features (advanced VML, SmartArt, charts) may not be reproduced exactly.
 
 ## Building & Contributing

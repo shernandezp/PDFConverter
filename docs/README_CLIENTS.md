@@ -98,10 +98,11 @@ If a font is not found, PdfSharp will substitute a default font. The output will
 
 ## Logging
 
-By default the library does not produce any console output. To enable diagnostic logging (useful for debugging image loading issues):
+By default the library does not produce any console output. Two optional hooks report what the converter did with images and fonts:
 
 ```csharp
 OpenXmlHelpers.ImageLoadLogger = message => Console.WriteLine(message);
+OpenXmlHelpers.FontLoadLogger = message => Console.WriteLine(message);
 ```
 
 ## Important Notes
@@ -109,7 +110,7 @@ OpenXmlHelpers.ImageLoadLogger = message => Console.WriteLine(message);
 - **Stream handling**: Stream overloads copy the input into memory to allow seeking. The caller's stream is not closed.
 - **Thread safety**: Each conversion call is independent. Multiple conversions can run concurrently.
 - **Temp files**: The library creates temporary files for images during conversion and cleans them up automatically.
-- **Image cropping**: `srcRect` cropping uses `System.Drawing.Bitmap` (Windows-only). On other platforms, the uncropped image is used as a graceful fallback.
-- **XLSX floating images**: Images placed in spacer columns that overflow rows are rendered as absolutely positioned floating images to match Excel's visual layout.
-- **XLSX connector shapes**: Connector shapes (commonly used for signature lines) are rendered as underscore lines in the PDF output.
+- **Windows-only image paths**: `srcRect` cropping and re-encoding of BMP/TIFF/EMF/WMF use `System.Drawing` (Windows-only). Elsewhere the original image is used as a graceful fallback.
+- **XLSX floating images**: Images in spacer columns that overflow rows are rendered as absolutely positioned floating images to match Excel's layout.
+- **Culture**: Conversion is culture-independent for parsing; number and date *output* follows the current culture, as Excel does.
 - **Scope**: The library is designed for documents with common formatting and objects. Very complex Office features (SmartArt, charts, advanced VML) may not render perfectly.

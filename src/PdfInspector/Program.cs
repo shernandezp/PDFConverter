@@ -6,6 +6,8 @@ using PdfSharp.Pdf.IO;
 using PdfSharp.Pdf.Content;
 using PdfSharp.Pdf.Content.Objects;
 
+Console.OutputEncoding = System.Text.Encoding.UTF8;
+
 if (args.Length < 1)
 {
     Console.WriteLine("Usage: PdfInspector <file.pdf>");
