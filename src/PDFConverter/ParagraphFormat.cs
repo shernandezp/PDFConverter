@@ -12,4 +12,6 @@ internal sealed record ParagraphFormat(
     double? LineSpacing,
     string? LineRule,
     bool HasExplicitSpacingBefore,
-    bool HasExplicitSpacingAfter);
+    bool HasExplicitSpacingAfter,
+    bool PageBreakBefore = false,
+    string? ShadingColor = null);

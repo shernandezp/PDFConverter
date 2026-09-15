@@ -773,18 +773,8 @@ public class DocxConverterIntegrationTests : IDisposable
         return ms.ToArray();
     }
 
-    /// <summary>
-    /// Creates a minimal valid PNG image using System.Drawing.
-    /// </summary>
-    private static byte[] CreateMinimalPng()
-    {
-        using var bmp = new System.Drawing.Bitmap(10, 10);
-        using var g = System.Drawing.Graphics.FromImage(bmp);
-        g.Clear(System.Drawing.Color.Red);
-        using var ms = new MemoryStream();
-        bmp.Save(ms, System.Drawing.Imaging.ImageFormat.Png);
-        return ms.ToArray();
-    }
+    private static byte[] CreateMinimalPng() => Convert.FromBase64String(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==");
 
     /// <summary>
     /// Builds a DOCX with a full-page anchor image in the header (not behindDoc).
