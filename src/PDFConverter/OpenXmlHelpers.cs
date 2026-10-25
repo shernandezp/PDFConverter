@@ -1,5 +1,5 @@
 using System.Runtime.InteropServices;
-using PdfSharp.Fonts;
+using PDFConverter.Layout;
 
 namespace PDFConverter;
 
@@ -26,13 +26,13 @@ public static class OpenXmlHelpers
         FontLoadLogger?.Invoke($"Registered {mappings.Count} explicit font mappings.");
     }
 
-    /// <summary>Installs the font resolver if none is present. Safe to call repeatedly.</summary>
+    /// <summary>Installs the font registry if none is present. Safe to call repeatedly.</summary>
     public static void EnsureFontResolverInitialized()
     {
-        if (GlobalFontSettings.FontResolver != null) return;
+        if (FontRegistry.IsInstalled) return;
         lock (Gate)
         {
-            if (GlobalFontSettings.FontResolver == null) RegisterFontsFromDirectory(null);
+            if (!FontRegistry.IsInstalled) RegisterFontsFromDirectory(null);
         }
     }
 
@@ -46,20 +46,16 @@ public static class OpenXmlHelpers
 
         var uniqueFiles = files.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         if (uniqueFiles.Count == 0 && (s_explicitFamilyMappings?.Count ?? 0) == 0)
-        {
-            FontLoadLogger?.Invoke("No system fonts or explicit mappings found; keeping the default font resolver.");
-            return;
-        }
+            FontLoadLogger?.Invoke("No font files found; relying on the platform font manager.");
 
         try
         {
-            GlobalFontSettings.FontResolver =
-                new DirectoryFontResolver(uniqueFiles, s_explicitFamilyMappings, FontLoadLogger);
-            FontLoadLogger?.Invoke($"Font resolver registered with {uniqueFiles.Count} font files.");
+            FontRegistry.Install(new FontRegistry(uniqueFiles, s_explicitFamilyMappings, FontLoadLogger));
+            FontLoadLogger?.Invoke($"Font registry installed with {uniqueFiles.Count} font files.");
         }
         catch (Exception ex)
         {
-            FontLoadLogger?.Invoke($"Failed to register font resolver: {ex.Message}");
+            FontLoadLogger?.Invoke($"Failed to install the font registry: {ex.Message}");
         }
     }
 

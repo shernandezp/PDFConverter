@@ -15,7 +15,8 @@ internal static class ExcelHelpers
         string? Name,
         int? ToRow = null,
         int? ToCol = null,
-        double FromColumnOffsetPoints = 0);
+        double FromColumnOffsetPoints = 0,
+        double FromRowOffsetPoints = 0);
 
     public record ConnectorLineInfo(int Row, int FromCol, int ToCol,
         double FromOffsetPoints, double ToOffsetPoints, double RowOffsetPoints);
@@ -89,7 +90,7 @@ internal static class ExcelHelpers
 
         var name = picture!.NonVisualPictureProperties?.NonVisualDrawingProperties?.Name?.Value;
         results.Add(new ExcelImageInfo(bytes, from.Row, from.Column, widthEmu, heightEmu, name,
-            to.Row, to.Column, Units.EmuToPoints(from.Offset)));
+            to.Row, to.Column, Units.EmuToPoints(from.Offset), Units.EmuToPoints(from.RowOffset)));
     }
 
     static (int? Row, int? Column, long Offset, long RowOffset) ReadMarker(Xdr.MarkerType? marker)

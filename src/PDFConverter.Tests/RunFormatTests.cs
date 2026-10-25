@@ -1,100 +1,71 @@
+using PDFConverter.Layout;
+using SkiaSharp;
 using Xunit;
-using MigraDoc.DocumentObjectModel;
 
 namespace PDFConverter.Tests;
 
 public class RunFormatTests
 {
-    [Fact]
-    public void ApplyTo_AllProperties_AppliedCorrectly()
-    {
-        var doc = new Document();
-        var section = doc.AddSection();
-        var para = section.AddParagraph();
-        var formatted = para.AddFormattedText("test");
+    static readonly TextStyle Defaults = new("Calibri", 11, Color: SKColors.Black);
 
+    [Fact]
+    public void ToTextStyle_AllProperties_AppliedCorrectly()
+    {
         var fmt = new RunFormat("Arial", "FF0000", true, true, true, 14.0);
-        fmt.ApplyTo(formatted);
+        var style = fmt.ToTextStyle(Defaults);
 
-        Assert.Equal("Arial", formatted.Font.Name);
-        Assert.True(formatted.Bold);
-        Assert.True(formatted.Italic);
-        Assert.Equal(Underline.Single, formatted.Underline);
-        Assert.Equal(Unit.FromPoint(14.0), formatted.Size);
+        Assert.Equal("Arial", style.FontFamily);
+        Assert.True(style.Bold);
+        Assert.True(style.Italic);
+        Assert.Equal(UnderlineStyle.Single, style.Underline);
+        Assert.Equal(14.0, style.Size);
+        Assert.Equal(SKColors.Red, style.Color);
     }
 
     [Fact]
-    public void ApplyTo_NullProperties_NoException()
+    public void ToTextStyle_NullProperties_FallBackToDefaults()
     {
-        var doc = new Document();
-        var section = doc.AddSection();
-        var para = section.AddParagraph();
-        var formatted = para.AddFormattedText("test");
-
         var fmt = new RunFormat(null, null, false, false, false, null);
-        fmt.ApplyTo(formatted);
+        var style = fmt.ToTextStyle(Defaults);
 
-        // Should not throw, and no formatting applied
-        Assert.False(formatted.Bold);
-        Assert.False(formatted.Italic);
+        Assert.Equal("Calibri", style.FontFamily);
+        Assert.Equal(11, style.Size);
+        Assert.False(style.Bold);
+        Assert.False(style.Italic);
+        Assert.Null(style.Underline);
+        Assert.Equal(SKColors.Black, style.Color);
     }
 
     [Fact]
-    public void ApplyTo_OnlySize_SetsSize()
+    public void ToTextStyle_OnlySize_SetsSize()
     {
-        var doc = new Document();
-        var section = doc.AddSection();
-        var para = section.AddParagraph();
-        var formatted = para.AddFormattedText("test");
+        var style = new RunFormat(null, null, false, false, false, 9.5).ToTextStyle(Defaults);
 
-        var fmt = new RunFormat(null, null, false, false, false, 9.5);
-        fmt.ApplyTo(formatted);
-
-        Assert.Equal(Unit.FromPoint(9.5), formatted.Size);
+        Assert.Equal(9.5, style.Size);
     }
 
     [Fact]
-    public void ApplyTo_ColorWithHash_ParsesCorrectly()
+    public void ToTextStyle_ColorWithoutHash_ParsesCorrectly()
     {
-        var doc = new Document();
-        var section = doc.AddSection();
-        var para = section.AddParagraph();
-        var formatted = para.AddFormattedText("test");
+        var style = new RunFormat(null, "0000FF", false, false, false, null).ToTextStyle(Defaults);
 
-        // The Color is stored without # but ApplyTo prepends #
-        var fmt = new RunFormat(null, "0000FF", false, false, false, null);
-        fmt.ApplyTo(formatted);
-
-        // Color should be blue — the actual parse adds #
-        Assert.NotEqual(Colors.Black, formatted.Color);
+        Assert.Equal(SKColors.Blue, style.Color);
     }
 
     [Fact]
-    public void ApplyTo_InvalidColor_DoesNotThrow()
+    public void ToTextStyle_InvalidColor_KeepsDefault()
     {
-        var doc = new Document();
-        var section = doc.AddSection();
-        var para = section.AddParagraph();
-        var formatted = para.AddFormattedText("test");
+        var style = new RunFormat(null, "ZZZZZZ", false, false, false, null).ToTextStyle(Defaults);
 
-        var fmt = new RunFormat(null, "ZZZZZZ", false, false, false, null);
-
-        // Should not throw due to try/catch in ApplyTo
-        fmt.ApplyTo(formatted);
+        Assert.Equal(SKColors.Black, style.Color);
     }
 
     [Fact]
-    public void ApplyTo_InvalidFontName_DoesNotThrow()
+    public void ToTextStyle_UnderlineStyle_IsCarriedOver()
     {
-        var doc = new Document();
-        var section = doc.AddSection();
-        var para = section.AddParagraph();
-        var formatted = para.AddFormattedText("test");
+        var fmt = new RunFormat(null, null, false, false, true, null, UnderlineStyle: UnderlineStyle.Dotted);
 
-        var fmt = new RunFormat("NonExistentFont_XYZ", null, false, false, false, null);
-
-        // Should not throw due to try/catch in ApplyTo
-        fmt.ApplyTo(formatted);
+        Assert.Equal(UnderlineStyle.Dotted, fmt.ToTextStyle(Defaults).Underline);
     }
 
     [Fact]

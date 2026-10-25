@@ -11,7 +11,7 @@ public class ColorUtilsTests
     public void TryParse_AcceptsOpenXmlColorSpellings(string value)
     {
         Assert.True(ColorUtils.TryParse(value, out var color));
-        Assert.Equal(MigraDoc.DocumentObjectModel.Color.Parse("#FF0000"), color);
+        Assert.Equal(SkiaSharp.SKColors.Red, color);
     }
 
     [Theory]

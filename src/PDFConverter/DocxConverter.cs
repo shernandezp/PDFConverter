@@ -1,4 +1,5 @@
 using DocumentFormat.OpenXml.Packaging;
+using PDFConverter.Layout;
 
 namespace PDFConverter;
 
@@ -46,17 +47,25 @@ public static class DocxConverter
 
     internal static void DocxToPdfInternal(WordprocessingDocument word, string pdfPath)
     {
-        using var images = new TempImageStore();
-        WordDocumentBuilder.Build(word, images).Save(pdfPath);
+        using var output = File.Create(pdfPath);
+        Render(word, output);
     }
 
     internal static byte[] RenderToBytes(WordprocessingDocument word)
     {
-        using var images = new TempImageStore();
-        var renderer = WordDocumentBuilder.Build(word, images);
         using var output = new MemoryStream();
-        renderer.Save(output, false);
+        Render(word, output);
         return output.ToArray();
+    }
+
+    static void Render(WordprocessingDocument word, Stream output)
+    {
+        OpenXmlHelpers.EnsureFontResolverInitialized();
+        using var images = new ImageStore();
+        var document = WordDocumentBuilder.Build(word, images);
+        using var engine = new LayoutEngine(FontRegistry.Current);
+        var pages = engine.Layout(document);
+        SkiaPdfWriter.Write(pages, output, document);
     }
 
     static MemoryStream Copy(Stream source)

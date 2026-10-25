@@ -1,9 +1,6 @@
 using DocumentFormat.OpenXml;
 using DocumentFormat.OpenXml.Packaging;
 using DocumentFormat.OpenXml.Spreadsheet;
-using PdfSharp.Pdf.Content;
-using PdfSharp.Pdf.Content.Objects;
-using PdfSharp.Pdf.IO;
 using Xunit;
 
 namespace PDFConverter.Tests;
@@ -15,9 +12,6 @@ namespace PDFConverter.Tests;
 /// </summary>
 public class ExcelMergedCellTests
 {
-    private record PdfLine(double X1, double Y1, double X2, double Y2, double Width);
-    private record PdfText(double X, double Y, string Content);
-    private record PdfImage(double Width, double Height, double X, double Y);
 
     /// <summary>
     /// BUG-034: Merged-away cells must still apply their borders.
@@ -549,94 +543,12 @@ public class ExcelMergedCellTests
         0xAE, 0x42, 0x60, 0x82
     ];
 
-    private static List<PdfLine> ExtractLines(byte[] pdfBytes)
-    {
-        var (lines, _) = ExtractLinesAndTexts(pdfBytes);
-        return lines;
-    }
+    private static List<PdfLine> ExtractLines(byte[] pdfBytes) => PdfProbe.Lines(pdfBytes, 1);
 
-    private static List<PdfImage> ExtractImages(byte[] pdfBytes)
-    {
-        var images = new List<PdfImage>();
-        using var ms = new MemoryStream(pdfBytes);
-        var doc = PdfSharp.Pdf.IO.PdfReader.Open(ms, PdfDocumentOpenMode.Import);
-        var content = ContentReader.ReadContent(doc.Pages[0]);
-        WalkForImages(content, images);
-        return images;
-    }
+    private static List<PdfImage> ExtractImages(byte[] pdfBytes) => PdfProbe.Images(pdfBytes, 1);
 
-    private static void WalkForImages(CSequence seq, List<PdfImage> images)
-    {
-        foreach (var item in seq)
-        {
-            if (item is CSequence sub) { WalkForImages(sub, images); continue; }
-            if (item is COperator op && op.OpCode.Name == "cm" && op.Operands.Count == 6)
-            {
-                double a = Val(op.Operands[0]), d = Val(op.Operands[3]);
-                double tx = Val(op.Operands[4]), ty = Val(op.Operands[5]);
-                if (a > 10 || d > 10)
-                    images.Add(new PdfImage(a, d, tx, ty));
-            }
-        }
-    }
-
-    private static (List<PdfLine> Lines, List<PdfText> Texts) ExtractLinesAndTexts(byte[] pdfBytes)
-    {
-        var lines = new List<PdfLine>();
-        var texts = new List<PdfText>();
-        using var ms = new MemoryStream(pdfBytes);
-        var doc = PdfSharp.Pdf.IO.PdfReader.Open(ms, PdfDocumentOpenMode.Import);
-        var content = ContentReader.ReadContent(doc.Pages[0]);
-        double curX = 0, curY = 0, lineW = 0, mx = 0, my = 0;
-        WalkPdfContent(content, lines, texts, ref curX, ref curY, ref lineW, ref mx, ref my);
-        return (lines, texts);
-    }
-
-    private static void WalkPdfContent(CSequence seq, List<PdfLine> lines, List<PdfText> texts,
-        ref double curX, ref double curY, ref double lineW, ref double mx, ref double my)
-    {
-        foreach (var item in seq)
-        {
-            if (item is CSequence sub)
-            {
-                WalkPdfContent(sub, lines, texts, ref curX, ref curY, ref lineW, ref mx, ref my);
-                continue;
-            }
-            if (item is not COperator op) continue;
-
-            switch (op.OpCode.Name)
-            {
-                case "w" when op.Operands.Count >= 1:
-                    lineW = Val(op.Operands[0]); break;
-                case "m" when op.Operands.Count >= 2:
-                    mx = Val(op.Operands[0]); my = Val(op.Operands[1]); break;
-                case "l" when op.Operands.Count >= 2:
-                    lines.Add(new PdfLine(mx, my, Val(op.Operands[0]), Val(op.Operands[1]), lineW)); break;
-                case "BT":
-                    curX = 0; curY = 0; break;
-                case "Tm" when op.Operands.Count == 6:
-                    curX = Val(op.Operands[4]); curY = Val(op.Operands[5]); break;
-                case "Td" when op.Operands.Count == 2:
-                    curX += Val(op.Operands[0]); curY += Val(op.Operands[1]); break;
-                case "Tj" or "TJ" when op.Operands.Count > 0:
-                    string txt = "";
-                    if (op.Operands[0] is CString s) txt = s.Value;
-                    else if (op.Operands[0] is CArray arr)
-                        foreach (var el in arr)
-                            if (el is CString cs) txt += cs.Value;
-                    if (!string.IsNullOrWhiteSpace(txt))
-                        texts.Add(new PdfText(curX, curY, txt.Trim()));
-                    break;
-            }
-        }
-    }
-
-    private static double Val(CObject o) => o switch
-    {
-        CReal r => r.Value,
-        CInteger ci => ci.Value,
-        _ => 0
-    };
+    private static (List<PdfLine> Lines, List<PdfText> Texts) ExtractLinesAndTexts(byte[] pdfBytes) =>
+        (PdfProbe.Lines(pdfBytes, 1), PdfProbe.Texts(pdfBytes));
 
     #endregion
 }

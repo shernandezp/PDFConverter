@@ -3,13 +3,7 @@
 [![CI Build](https://github.com/shernandezp/PDFConverter/actions/workflows/ci-build.yml/badge.svg)](https://github.com/shernandezp/PDFConverter/actions/workflows/ci-build.yml)
 [![NuGet](https://img.shields.io/nuget/v/DocxXlsx.PDFConverter.svg)](https://www.nuget.org/packages/DocxXlsx.PDFConverter/)
 
-A lightweight, free and open-source .NET library that converts **DOCX** and **XLSX** files to **PDF** using [OpenXML SDK](https://github.com/dotnet/Open-XML-SDK) and [PdfSharp/MigraDoc](https://github.com/empira/PDFsharp). No Microsoft Office installation required.
-
-## Why This Library?
-
-I don't currently have the budget to pay for a licensed library to convert DOCX and XLSX files to PDF, even though there are many very good options on the market. So, I decided to build my own converter. It may or may not fit your needs. It's not the fastest option if you're looking for high performance, but it's good enough for me, especially considering that it's free. For simple files with simple objects, it should be enough.
-
-This project was built with significant help from [GitHub Copilot](https://github.com/features/copilot) — from diagnosing tricky OpenXML quirks to fixing MigraDoc rendering issues, Copilot was an invaluable coding partner throughout the entire development process.
+A lightweight, free and open-source .NET library that converts **DOCX** and **XLSX** files to **PDF** using [OpenXML SDK](https://github.com/dotnet/Open-XML-SDK) and [SkiaSharp](https://github.com/mono/SkiaSharp). No Microsoft Office installation required.
 
 ## Features
 
@@ -88,14 +82,25 @@ OpenXmlHelpers.RegisterFontMappings(new Dictionary<string, string>
 | Lists and numbering (bullets, multi-level) | ✅ | — |
 | Page number fields (PAGE, NUMPAGES) | ✅ | — |
 | Landscape orientation | ✅ | ✅ |
+| Section breaks with their own page setup, headers and footers | ✅ | — |
+| Widow/orphan control, keep with next, keep lines together | ✅ | — |
+| Character spacing, width scaling, strike-through, highlight, hidden text | ✅ | — |
+| Paragraph borders | ✅ | — |
+| Dashed and dotted borders | ✅ | ✅ |
+| PDF metadata from document properties | ✅ | ✅ |
+| Text flowing beside pictures (square, tight, through) | ✅ | — |
+| Complex scripts, ligatures and kerning (HarfBuzz) | ✅ | ✅ |
+| Right-to-left paragraphs and mixed-direction lines | ✅ | — |
+| TIFF, EMF and WMF pictures on every platform | ✅ | ✅ |
 
 ## Known Limitations
 
 - **Font substitution**: If a document uses fonts not installed on the system, the closest available family is used, which may cause minor layout differences.
-- **Character spacing**: MigraDoc has no letter-spacing, so `w:spacing` (condensed/expanded text) and `w:w` width scaling are ignored. Lines may wrap slightly differently from Word.
+- **Character spacing**: condensed spacing is not applied to space characters, because converter-generated documents use it to encode line breaks; letters may therefore wrap slightly differently from Word.
 - **Color emoji**: Only monochrome emoji glyphs (Noto Emoji) are rendered; color emoji (COLR/CPAL) is not supported.
-- **Windows-only image paths**: `srcRect` cropping and re-encoding of BMP/TIFF/EMF/WMF use `System.Drawing`, which is Windows-only. Elsewhere the original image is used as a graceful fallback.
-- **Text wrapping around images**: MigraDoc cannot flow text beside a shape, so square and tight wrapping render as floating images.
+- **Tight and through wrapping** use the picture's bounding box, like square wrapping; text never follows the picture's outline.
+- **Metafiles (EMF, WMF)**: only the raster picture embedded in the metafile is rendered; vector-only metafiles need Windows, where GDI+ converts them.
+- **Bidirectional text**: right-to-left runs are reordered per line with a simplified algorithm; nested embeddings and bracket mirroring are not handled.
 - **Complex layouts**: Very complex Office features (advanced VML, SmartArt, charts) may not be reproduced exactly.
 
 ## Building & Contributing

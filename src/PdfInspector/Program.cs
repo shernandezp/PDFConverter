@@ -1,10 +1,4 @@
-﻿// PdfInspector — diagnostic tool for inspecting generated PDF files.
-// Shows page count, image resources, transforms, and text content per page.
-
-using PdfSharp.Pdf;
-using PdfSharp.Pdf.IO;
-using PdfSharp.Pdf.Content;
-using PdfSharp.Pdf.Content.Objects;
+﻿using UglyToad.PdfPig;
 
 Console.OutputEncoding = System.Text.Encoding.UTF8;
 
@@ -21,138 +15,41 @@ if (!File.Exists(path))
     return;
 }
 
-var doc = PdfReader.Open(path, PdfDocumentOpenMode.Import);
+using var document = PdfDocument.Open(path);
 Console.WriteLine($"File: {path}");
-Console.WriteLine($"Pages: {doc.PageCount}");
+Console.WriteLine($"Pages: {document.NumberOfPages}");
 
-for (int i = 0; i < doc.PageCount; i++)
+foreach (var page in document.GetPages())
 {
-    var page = doc.Pages[i];
-    Console.WriteLine($"\n--- Page {i + 1} ({page.Width.Point:F0}x{page.Height.Point:F0}pt) ---");
+    Console.WriteLine($"\n--- Page {page.Number} ({page.Width:F0}x{page.Height:F0}pt) ---");
 
-    // List image XObjects
-    var resources = page.Elements.GetDictionary("/Resources");
-    if (resources != null)
+    var fonts = page.Letters.Select(letter => letter.FontName).Distinct().ToList();
+    Console.WriteLine($"  Fonts: {string.Join(", ", fonts)}");
+
+    var images = page.GetImages().ToList();
+    Console.WriteLine($"  Images ({images.Count}):");
+    foreach (var image in images)
     {
-        var xobjects = resources.Elements.GetDictionary("/XObject");
-        if (xobjects != null)
-        {
-            Console.WriteLine($"  Images ({xobjects.Elements.Count}):");
-            foreach (var key in xobjects.Elements.Keys)
-            {
-                try
-                {
-                    var xref = xobjects.Elements.GetReference(key);
-                    if (xref?.Value is PdfDictionary xobj)
-                    {
-                        var subtype = xobj.Elements.GetString("/Subtype");
-                        var w = xobj.Elements.GetInteger("/Width");
-                        var h = xobj.Elements.GetInteger("/Height");
-                        var filter = xobj.Elements.GetString("/Filter");
-                        var len = xobj.Elements.GetInteger("/Length");
-                        Console.WriteLine($"    {key}: {subtype} {w}x{h}px filter={filter} {len}bytes");
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"    {key}: error reading: {ex.Message}");
-                }
-            }
-        }
-        else
-        {
-            Console.WriteLine("  No images");
-        }
+        var bounds = image.BoundingBox;
+        Console.WriteLine($"    {image.WidthInSamples}x{image.HeightInSamples}px at ({bounds.Left:F1}, {bounds.Bottom:F1}) " +
+                          $"size {bounds.Width:F1}x{bounds.Height:F1}pt");
     }
 
-    // Parse content stream for image placement and text
-    try
+    var annotations = page.GetAnnotations().ToList();
+    if (annotations.Count > 0)
     {
-        var content = ContentReader.ReadContent(page);
-        ExtractOps(content, "  ");
-    }
-    catch (Exception ex)
-    {
-        Console.WriteLine($"  Content parse error: {ex.Message}");
-    }
-}
-
-static void ExtractOps(CSequence seq, string indent)
-{
-    string? lastCm = null;
-    var textParts = new List<string>();
-
-    foreach (var obj in seq)
-    {
-        if (obj is COperator op)
-        {
-            var name = op.OpCode.OpCodeName.ToString();
-
-            // Track transform matrix
-            if (name == "cm" && op.Operands.Count >= 6)
-            {
-                var vals = op.Operands.Select(o => o.ToString()).ToArray();
-                lastCm = string.Join(" ", vals);
-            }
-
-            // Image draw
-            if (name == "Do" && op.Operands.Count > 0)
-            {
-                var imgName = op.Operands[0].ToString();
-                if (lastCm != null)
-                    Console.WriteLine($"{indent}DrawImage {imgName} transform=[{lastCm}]");
-                else
-                    Console.WriteLine($"{indent}DrawImage {imgName}");
-                lastCm = null;
-            }
-
-            // Text show operators
-            if (name == "Tj" && op.Operands.Count > 0)
-            {
-                textParts.Add(op.Operands[0].ToString()?.Trim('(', ')') ?? "");
-            }
-            if (name == "TJ" && op.Operands.Count > 0)
-            {
-                foreach (var item in op.Operands)
-                {
-                    if (item is CString s)
-                        textParts.Add(s.Value);
-                    else if (item is CSequence arr)
-                    {
-                        foreach (var sub in arr)
-                        {
-                            if (sub is CString ss)
-                                textParts.Add(ss.Value);
-                        }
-                    }
-                }
-            }
-
-            // End text block — flush collected text
-            if (name == "ET" && textParts.Count > 0)
-            {
-                var line = string.Join("", textParts).Trim();
-                if (!string.IsNullOrWhiteSpace(line))
-                {
-                    if (line.Length > 80) line = line[..80] + "...";
-                    Console.WriteLine($"{indent}Text: \"{line}\"");
-                }
-                textParts.Clear();
-            }
-        }
-        else if (obj is CSequence inner)
-        {
-            ExtractOps(inner, indent);
-        }
+        Console.WriteLine($"  Annotations ({annotations.Count}):");
+        foreach (var annotation in annotations)
+            Console.WriteLine($"    {annotation.Type} at ({annotation.Rectangle.Left:F1}, {annotation.Rectangle.Bottom:F1}) {annotation.Action?.Type}");
     }
 
-    if (textParts.Count > 0)
+    var lines = page.GetWords()
+        .GroupBy(word => Math.Round(word.Letters[0].StartBaseLine.Y))
+        .OrderByDescending(group => group.Key);
+    foreach (var line in lines)
     {
-        var line = string.Join("", textParts).Trim();
-        if (!string.IsNullOrWhiteSpace(line))
-        {
-            if (line.Length > 80) line = line[..80] + "...";
-            Console.WriteLine($"{indent}Text: \"{line}\"");
-        }
+        var text = string.Join(" ", line.OrderBy(word => word.BoundingBox.Left).Select(word => word.Text));
+        if (text.Length > 100) text = text[..100] + "...";
+        Console.WriteLine($"  y={line.Key,6:F0}  {text}");
     }
 }

@@ -1,5 +1,5 @@
 using Xunit;
-using MigraDoc.DocumentObjectModel;
+using PDFConverter.Layout;
 
 namespace PDFConverter.Tests;
 

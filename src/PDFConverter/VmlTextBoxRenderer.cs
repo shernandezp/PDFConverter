@@ -1,6 +1,5 @@
 using DocumentFormat.OpenXml;
-using MigraDoc.DocumentObjectModel;
-using MigraDoc.DocumentObjectModel.Tables;
+using PDFConverter.Layout;
 using W = DocumentFormat.OpenXml.Wordprocessing;
 
 namespace PDFConverter;
@@ -17,25 +16,23 @@ internal static class VmlTextBoxRenderer
         }
 
         // Several shapes in one paragraph are positioned side by side in Word; a borderless
-        // one-row table is the closest MigraDoc equivalent.
+        // one-row table is the closest equivalent.
         var boxes = pictures
             .Select(picture => (Picture: picture, Style: ReadShapeStyle(picture)))
             .OrderBy(box => box.Style.MarginLeft)
             .ToList();
 
-        var contentWidth = section.PageSetup.PageWidth.Point
-            - section.PageSetup.LeftMargin.Point - section.PageSetup.RightMargin.Point;
-
+        var contentWidth = section.ContentWidth;
         var table = section.AddTable();
-        table.Borders.Visible = false;
         foreach (var box in boxes)
-            table.AddColumn(Unit.FromPoint(Math.Min(box.Style.Width, contentWidth / boxes.Count)));
+            table.ColumnWidths.Add(Math.Min(box.Style.Width, contentWidth / boxes.Count));
 
         var row = table.AddRow();
         for (var i = 0; i < boxes.Count; i++)
         {
-            row[i].VerticalAlignment = VerticalAlignment.Top;
-            RenderIntoCell(ctx, boxes[i].Picture, row[i]);
+            var cell = row.Cell(i);
+            cell.VerticalAlignment = VerticalAlignment.Top;
+            RenderIntoCell(ctx, boxes[i].Picture, cell, table.ColumnWidths[i]);
         }
     }
 
@@ -66,9 +63,10 @@ internal static class VmlTextBoxRenderer
             {
                 if (child is W.Paragraph source)
                 {
-                    var target = section.AddParagraph();
+                    var target = ctx.Prepare(section.AddParagraph());
                     ApplyBoxParagraphFormat(target, source, fill);
-                    if (!WordContentRenderer.Render(ctx, source, source, target)) target.AddText(" ");
+                    AddListLabel(ctx, source, target);
+                    WordContentRenderer.Render(ctx, source, source, target);
                 }
                 else if (child is W.Table table)
                 {
@@ -78,7 +76,7 @@ internal static class VmlTextBoxRenderer
         }
     }
 
-    static void RenderIntoCell(WordRenderContext ctx, W.Picture picture, Cell cell)
+    static void RenderIntoCell(WordRenderContext ctx, W.Picture picture, TableCell cell, double cellWidth)
     {
         foreach (var (textBox, fill) in TextBoxes(picture))
         {
@@ -86,19 +84,24 @@ internal static class VmlTextBoxRenderer
             {
                 if (child is W.Paragraph source)
                 {
-                    var target = cell.AddParagraph();
-                    target.Format.SpaceBefore = 0;
-                    target.Format.SpaceAfter = 0;
-                    target.Format.Alignment = WordHelpers.GetParagraphFormatting(source.ParagraphProperties).Alignment;
-                    if (ColorUtils.TryParse(fill, out var color)) target.Format.Shading.Color = color;
-                    if (!WordContentRenderer.Render(ctx, source, source, target)) target.AddText(" ");
+                    var target = ctx.Prepare(cell.AddParagraph());
+                    target.Alignment = WordHelpers.GetParagraphFormatting(source.ParagraphProperties).Alignment;
+                    if (ColorUtils.TryParse(fill, out var color)) target.Shading = color;
+                    AddListLabel(ctx, source, target);
+                    WordContentRenderer.Render(ctx, source, source, target);
                 }
                 else if (child is W.Table table)
                 {
-                    WordTableRenderer.RenderNestedTable(ctx, table, cell);
+                    WordTableRenderer.RenderNestedTable(ctx, table, cell, cellWidth);
                 }
             }
         }
+    }
+
+    static void AddListLabel(WordRenderContext ctx, W.Paragraph source, Paragraph target)
+    {
+        var label = WordDocumentBuilder.ListLabel(ctx, source);
+        if (label != null) target.Add(new TextRun(label, target.DefaultStyle));
     }
 
     static IEnumerable<(OpenXmlElement TextBox, string? FillColor)> TextBoxes(W.Picture picture)
@@ -114,24 +117,21 @@ internal static class VmlTextBoxRenderer
     static void ApplyBoxParagraphFormat(Paragraph target, W.Paragraph source, string? fillColor)
     {
         var format = WordHelpers.GetParagraphFormatting(source.ParagraphProperties);
-        target.Format.Alignment = format.Alignment;
-        target.Format.SpaceBefore = Unit.FromPoint(format.HasExplicitSpacingBefore ? format.SpacingBefore : 0);
-        target.Format.SpaceAfter = Unit.FromPoint(format.HasExplicitSpacingAfter ? format.SpacingAfter : 0);
+        target.Alignment = format.Alignment;
+        if (format.LeftIndent > 0) target.LeftIndent = format.LeftIndent;
+        if (format.RightIndent > 0) target.RightIndent = format.RightIndent;
+        if (format.FirstLineIndent != 0) target.FirstLineIndent = format.FirstLineIndent;
+        target.SpaceBefore = format.HasExplicitSpacingBefore ? format.SpacingBefore : 0;
+        target.SpaceAfter = format.HasExplicitSpacingAfter ? format.SpacingAfter : 0;
 
         if (format.LineSpacing is { } spacing && spacing > 0)
         {
-            if (string.Equals(format.LineRule, "Exact", StringComparison.OrdinalIgnoreCase))
-            {
-                target.Format.LineSpacingRule = LineSpacingRule.Exactly;
-                target.Format.LineSpacing = Unit.FromPoint(spacing);
-            }
-            else
-            {
-                target.Format.LineSpacingRule = LineSpacingRule.Multiple;
-                target.Format.LineSpacing = spacing;
-            }
+            target.LineSpacing = spacing;
+            target.LineSpacingRule = string.Equals(format.LineRule, "Exact", StringComparison.OrdinalIgnoreCase)
+                ? LineSpacingRule.Exactly
+                : LineSpacingRule.Multiple;
         }
 
-        if (ColorUtils.TryParse(fillColor, out var color)) target.Format.Shading.Color = color;
+        if (ColorUtils.TryParse(fillColor, out var color)) target.Shading = color;
     }
 }

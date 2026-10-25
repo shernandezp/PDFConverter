@@ -2,6 +2,30 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.0] - 2026-10-25
+
+### Changed
+- Rendering backend replaced: PDFsharp/MigraDoc (AGPL since 6.5.0) gives way to SkiaSharp and SkiaSharp.HarfBuzz 4.153.1 (MIT) with an in-house layout engine; public API unchanged
+- Fonts are embedded as glyph-stripped subsets (`.ttc` included); pictures are decoded in memory without temporary files
+- Tests and `PdfInspector` read PDFs with PdfPig
+- Dependencies updated: System.Drawing.Common 10.0.13, Microsoft.NET.Test.Sdk 18.11.0, xunit.v3 4.0.2, xunit.runner.visualstudio 4.0.1
+
+### Added
+- DOCX: section breaks with their own page setup, headers and footers; widow/orphan and keep controls; paragraph borders; character spacing and scaling, strike-through, highlight and hidden text
+- Text flows around pictures with square, tight or through wrapping
+- HarfBuzz shaping (kerning, ligatures, complex scripts) and right-to-left paragraphs
+- Dashed and dotted borders; PDF metadata from the document properties
+- TIFF, EMF and WMF pictures decoded on every platform
+- XLSX: text overflow into empty neighbouring cells, vertical merges, pictures keep their anchor offsets
+
+### Fixed
+- DOCX: `nil` cell borders no longer inherit the table border; exact row heights clip; bookmark links are internal annotations
+- Fonts: a regular face inside a `.ttc` collection resolved to its bold or italic file
+- XLSX: cells default to bottom vertical alignment and numbers to right alignment
+
+### Removed
+- `TextMeasure`, `PdfImageLinks`, `TempImageStore` and `DirectoryFontResolver`
+
 ## [0.1.0] - 2026-09-14
 
 ### Added

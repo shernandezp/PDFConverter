@@ -1,9 +1,6 @@
 using DocumentFormat.OpenXml;
 using DocumentFormat.OpenXml.Packaging;
 using DocumentFormat.OpenXml.Spreadsheet;
-using PdfSharp.Pdf.Content;
-using PdfSharp.Pdf.Content.Objects;
-using PdfSharp.Pdf.IO;
 using Xunit;
 
 namespace PDFConverter.Tests;
@@ -31,8 +28,6 @@ public class XlsxConverterIntegrationTests : IDisposable
         return path;
     }
 
-    private record PdfImage(double Width, double Height, double X, double Y);
-    private record PdfText(double X, double Y, string Content);
 
     private static void AssertValidPdf(byte[] pdfBytes)
     {
@@ -44,18 +39,6 @@ public class XlsxConverterIntegrationTests : IDisposable
         Assert.Equal((byte)'F', pdfBytes[3]);
     }
 
-    private static int GetPdfPageCount(byte[] pdfBytes)
-    {
-        using var ms = new MemoryStream(pdfBytes);
-        using var pdf = PdfReader.Open(ms, PdfDocumentOpenMode.Import);
-        return pdf.PageCount;
-    }
-
-    private static int GetPdfPageCount(string pdfPath)
-    {
-        using var pdf = PdfReader.Open(pdfPath, PdfDocumentOpenMode.Import);
-        return pdf.PageCount;
-    }
 
     #region Basic Conversion
 
@@ -69,7 +52,7 @@ public class XlsxConverterIntegrationTests : IDisposable
         var pdfBytes = Converters.XlsxToPdfBytes(xlsx);
 
         AssertValidPdf(pdfBytes);
-        Assert.Equal(1, GetPdfPageCount(pdfBytes));
+        Assert.Equal(1, PdfProbe.PageCount(pdfBytes));
     }
 
     /// <summary>
@@ -80,7 +63,7 @@ public class XlsxConverterIntegrationTests : IDisposable
     {
         var xlsx = BuildSimpleSheet(3, 3);
         var pdfBytes = Converters.XlsxToPdfBytes(xlsx);
-        var texts = ExtractTexts(pdfBytes);
+        var texts = PdfProbe.Texts(pdfBytes);
 
         // Check for cell content — at least one cell should be rendered
         Assert.Contains(texts, t => t.Content.Contains("R1C1"));
@@ -112,7 +95,7 @@ public class XlsxConverterIntegrationTests : IDisposable
     {
         var xlsx = BuildBorderedSheet();
         var pdfBytes = Converters.XlsxToPdfBytes(xlsx);
-        var lines = ExtractLines(pdfBytes);
+        var lines = PdfProbe.Lines(pdfBytes);
 
         AssertValidPdf(pdfBytes);
         Assert.True(lines.Count > 0, "Expected border lines in PDF output");
@@ -138,7 +121,7 @@ public class XlsxConverterIntegrationTests : IDisposable
     {
         var xlsx = BuildMultiFontSheet();
         var pdfBytes = Converters.XlsxToPdfBytes(xlsx);
-        var texts = ExtractTexts(pdfBytes);
+        var texts = PdfProbe.Texts(pdfBytes);
 
         AssertValidPdf(pdfBytes);
         Assert.Contains(texts, t => t.Content.Contains("Small"));
@@ -158,7 +141,7 @@ public class XlsxConverterIntegrationTests : IDisposable
     {
         var xlsx = BuildMergedSheet();
         var pdfBytes = Converters.XlsxToPdfBytes(xlsx);
-        var texts = ExtractTexts(pdfBytes);
+        var texts = PdfProbe.Texts(pdfBytes);
 
         AssertValidPdf(pdfBytes);
         // PDF may split multi-word text into separate fragments
@@ -173,7 +156,7 @@ public class XlsxConverterIntegrationTests : IDisposable
     {
         var xlsx = BuildVerticalMergeSheet();
         var pdfBytes = Converters.XlsxToPdfBytes(xlsx);
-        var texts = ExtractTexts(pdfBytes);
+        var texts = PdfProbe.Texts(pdfBytes);
 
         AssertValidPdf(pdfBytes);
         // PDF may split multi-word text into separate fragments
@@ -192,7 +175,7 @@ public class XlsxConverterIntegrationTests : IDisposable
     {
         var xlsx = BuildSheetWithImage();
         var pdfBytes = Converters.XlsxToPdfBytes(xlsx);
-        var images = ExtractImages(pdfBytes);
+        var images = PdfProbe.Images(pdfBytes);
 
         AssertValidPdf(pdfBytes);
         Assert.True(images.Count >= 1,
@@ -208,7 +191,7 @@ public class XlsxConverterIntegrationTests : IDisposable
     {
         var xlsx = BuildSheetWithImage();
         var pdfBytes = Converters.XlsxToPdfBytes(xlsx);
-        var images = ExtractImages(pdfBytes);
+        var images = PdfProbe.Images(pdfBytes);
 
         Assert.True(images.Count >= 1);
         var img = images[0];
@@ -232,12 +215,12 @@ public class XlsxConverterIntegrationTests : IDisposable
 
         // Byte array overload
         var pdfFromBytes = Converters.XlsxToPdfBytes(xlsx);
-        int countBytes = GetPdfPageCount(pdfFromBytes);
+        int countBytes = PdfProbe.PageCount(pdfFromBytes);
 
         // Stream overload
         using var stream = new MemoryStream(xlsx);
         var pdfFromStream = Converters.XlsxToPdfBytes(stream);
-        int countStream = GetPdfPageCount(pdfFromStream);
+        int countStream = PdfProbe.PageCount(pdfFromStream);
 
         // File path overload
         var tempXlsx = Path.GetTempFileName() + ".xlsx";
@@ -246,7 +229,7 @@ public class XlsxConverterIntegrationTests : IDisposable
         {
             File.WriteAllBytes(tempXlsx, xlsx);
             XlsxConverter.XlsxToPdf(tempXlsx, tempPdf);
-            int countFile = GetPdfPageCount(tempPdf);
+            int countFile = PdfProbe.PageCount(tempPdf);
 
             Assert.Equal(countBytes, countStream);
             Assert.Equal(countBytes, countFile);
@@ -677,159 +660,8 @@ public class XlsxConverterIntegrationTests : IDisposable
         0xAE, 0x42, 0x60, 0x82
     ];
 
-    private (List<PdfImage> Images, List<PdfText> Texts) AnalyzePdf(byte[] pdfBytes)
-    {
-        var images = new List<PdfImage>();
-        var texts = new List<PdfText>();
-
-        using var ms = new MemoryStream(pdfBytes);
-        var doc = PdfReader.Open(ms, PdfDocumentOpenMode.Import);
-        var content = ContentReader.ReadContent(doc.Pages[0]);
-
-        double curX = 0, curY = 0;
-        WalkContent(content, images, texts, ref curX, ref curY);
-        return (images, texts);
-    }
-
-    private static List<PdfText> ExtractTexts(byte[] pdfBytes)
-    {
-        var texts = new List<PdfText>();
-        using var ms = new MemoryStream(pdfBytes);
-        var doc = PdfReader.Open(ms, PdfDocumentOpenMode.Import);
-        foreach (var page in doc.Pages)
-        {
-            var content = ContentReader.ReadContent(page);
-            double curX = 0, curY = 0;
-            WalkForTexts(content, texts, ref curX, ref curY);
-        }
-        return texts;
-    }
-
-    private static List<PdfImage> ExtractImages(byte[] pdfBytes)
-    {
-        var images = new List<PdfImage>();
-        using var ms = new MemoryStream(pdfBytes);
-        var doc = PdfReader.Open(ms, PdfDocumentOpenMode.Import);
-        foreach (var page in doc.Pages)
-        {
-            var content = ContentReader.ReadContent(page);
-            WalkForImages(content, images);
-        }
-        return images;
-    }
-
-    private static List<PdfLine> ExtractLines(byte[] pdfBytes)
-    {
-        var lines = new List<PdfLine>();
-        using var ms = new MemoryStream(pdfBytes);
-        var doc = PdfReader.Open(ms, PdfDocumentOpenMode.Import);
-        foreach (var page in doc.Pages)
-        {
-            var content = ContentReader.ReadContent(page);
-            double lineW = 0, mx = 0, my = 0;
-            WalkForLines(content, lines, ref lineW, ref mx, ref my);
-        }
-        return lines;
-    }
-
-    private record PdfLine(double X1, double Y1, double X2, double Y2, double Width);
-
-    private void WalkContent(CSequence seq, List<PdfImage> images, List<PdfText> texts,
-        ref double curX, ref double curY)
-    {
-        for (int i = 0; i < seq.Count; i++)
-        {
-            if (seq[i] is CSequence sub) { WalkContent(sub, images, texts, ref curX, ref curY); continue; }
-            if (seq[i] is not COperator op) continue;
-
-            if (op.OpCode.Name == "cm" && op.Operands.Count == 6)
-            {
-                double a = Val(op.Operands[0]), d = Val(op.Operands[3]);
-                double tx = Val(op.Operands[4]), ty = Val(op.Operands[5]);
-                if (a > 10 || d > 10)
-                    images.Add(new PdfImage(a, d, tx, ty));
-            }
-            else if (op.OpCode.Name == "BT") { curX = 0; curY = 0; }
-            else if (op.OpCode.Name == "Tm" && op.Operands.Count == 6)
-            { curX = Val(op.Operands[4]); curY = Val(op.Operands[5]); }
-            else if (op.OpCode.Name == "Td" && op.Operands.Count == 2)
-            { curX += Val(op.Operands[0]); curY += Val(op.Operands[1]); }
-            else if ((op.OpCode.Name == "Tj" || op.OpCode.Name == "TJ") && op.Operands.Count > 0)
-            {
-                string txt = "";
-                if (op.Operands[0] is CString s) txt = s.Value;
-                else if (op.Operands[0] is CArray arr)
-                    foreach (var el in arr)
-                        if (el is CString cs) txt += cs.Value;
-                if (!string.IsNullOrWhiteSpace(txt))
-                    texts.Add(new PdfText(curX, curY, txt.Trim()));
-            }
-        }
-    }
-
-    private static void WalkForTexts(CSequence seq, List<PdfText> texts, ref double curX, ref double curY)
-    {
-        foreach (var item in seq)
-        {
-            if (item is CSequence sub) { WalkForTexts(sub, texts, ref curX, ref curY); continue; }
-            if (item is not COperator op) continue;
-            switch (op.OpCode.Name)
-            {
-                case "BT": curX = 0; curY = 0; break;
-                case "Tm" when op.Operands.Count == 6:
-                    curX = Val(op.Operands[4]); curY = Val(op.Operands[5]); break;
-                case "Td" when op.Operands.Count == 2:
-                    curX += Val(op.Operands[0]); curY += Val(op.Operands[1]); break;
-                case "Tj" or "TJ" when op.Operands.Count > 0:
-                    string txt = "";
-                    if (op.Operands[0] is CString s) txt = s.Value;
-                    else if (op.Operands[0] is CArray arr)
-                        foreach (var el in arr) if (el is CString cs) txt += cs.Value;
-                    if (!string.IsNullOrWhiteSpace(txt))
-                        texts.Add(new PdfText(curX, curY, txt.Trim()));
-                    break;
-            }
-        }
-    }
-
-    private static void WalkForImages(CSequence seq, List<PdfImage> images)
-    {
-        foreach (var item in seq)
-        {
-            if (item is CSequence sub) { WalkForImages(sub, images); continue; }
-            if (item is COperator op && op.OpCode.Name == "cm" && op.Operands.Count == 6)
-            {
-                double a = Val(op.Operands[0]), d = Val(op.Operands[3]);
-                double tx = Val(op.Operands[4]), ty = Val(op.Operands[5]);
-                if (a > 10 || d > 10) images.Add(new PdfImage(a, d, tx, ty));
-            }
-        }
-    }
-
-    private static void WalkForLines(CSequence seq, List<PdfLine> lines,
-        ref double lineW, ref double mx, ref double my)
-    {
-        foreach (var item in seq)
-        {
-            if (item is CSequence sub) { WalkForLines(sub, lines, ref lineW, ref mx, ref my); continue; }
-            if (item is not COperator op) continue;
-            switch (op.OpCode.Name)
-            {
-                case "w" when op.Operands.Count >= 1: lineW = Val(op.Operands[0]); break;
-                case "m" when op.Operands.Count >= 2:
-                    mx = Val(op.Operands[0]); my = Val(op.Operands[1]); break;
-                case "l" when op.Operands.Count >= 2:
-                    lines.Add(new PdfLine(mx, my, Val(op.Operands[0]), Val(op.Operands[1]), lineW)); break;
-            }
-        }
-    }
-
-    private static double Val(CObject o) => o switch
-    {
-        CReal r => r.Value,
-        CInteger ci => ci.Value,
-        _ => 0
-    };
+    private static (List<PdfImage> Images, List<PdfText> Texts) AnalyzePdf(byte[] pdfBytes) =>
+        (PdfProbe.Images(pdfBytes, 1), PdfProbe.Texts(pdfBytes));
 
     #endregion
 }

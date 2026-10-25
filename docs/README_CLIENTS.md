@@ -94,7 +94,7 @@ OpenXmlHelpers.RegisterFontMappings(new Dictionary<string, string>
 });
 ```
 
-If a font is not found, PdfSharp will substitute a default font. The output will still be readable, but character widths may differ slightly from the original document.
+If a font is not found, the closest installed family is substituted. The output will still be readable, but character widths may differ slightly from the original document.
 
 ## Logging
 
@@ -109,8 +109,7 @@ OpenXmlHelpers.FontLoadLogger = message => Console.WriteLine(message);
 
 - **Stream handling**: Stream overloads copy the input into memory to allow seeking. The caller's stream is not closed.
 - **Thread safety**: Each conversion call is independent. Multiple conversions can run concurrently.
-- **Temp files**: The library creates temporary files for images during conversion and cleans them up automatically.
-- **Windows-only image paths**: `srcRect` cropping and re-encoding of BMP/TIFF/EMF/WMF use `System.Drawing` (Windows-only). Elsewhere the original image is used as a graceful fallback.
+- **Pictures**: PNG, JPEG, GIF, BMP, WebP, TIFF and the raster content of EMF/WMF metafiles are decoded on every platform; vector-only metafiles render on Windows only.
 - **XLSX floating images**: Images in spacer columns that overflow rows are rendered as absolutely positioned floating images to match Excel's layout.
 - **Culture**: Conversion is culture-independent for parsing; number and date *output* follows the current culture, as Excel does.
 - **Scope**: The library is designed for documents with common formatting and objects. Very complex Office features (SmartArt, charts, advanced VML) may not render perfectly.

@@ -1,6 +1,6 @@
 using DocumentFormat.OpenXml;
 using DocumentFormat.OpenXml.Packaging;
-using MigraDoc.DocumentObjectModel;
+using PDFConverter.Layout;
 using W = DocumentFormat.OpenXml.Wordprocessing;
 
 namespace PDFConverter;
@@ -80,6 +80,7 @@ internal static class WordHelpers
             var j when j == W.JustificationValues.Center => ParagraphAlignment.Center,
             var j when j == W.JustificationValues.Right => ParagraphAlignment.Right,
             var j when j == W.JustificationValues.Both => ParagraphAlignment.Justify,
+            var j when j == W.JustificationValues.End => ParagraphAlignment.Right,
             _ => ParagraphAlignment.Left,
         };
 
@@ -131,7 +132,21 @@ internal static class WordHelpers
         var shading = pPr.Shading?.Fill?.Value;
 
         return new ParagraphFormat(alignment, leftIndent, rightIndent, firstLine, before, after,
-            lineSpacing, lineRule, hasExplicitBefore, hasExplicitAfter, pageBreakBefore, shading);
+            lineSpacing, lineRule, hasExplicitBefore, hasExplicitAfter, pageBreakBefore, shading,
+            ParagraphBorders(pPr.ParagraphBorders), IsToggleOn(pPr.KeepNext), IsToggleOn(pPr.KeepLines),
+            IsToggleOn(pPr.WidowControl), IsToggleOn(pPr.BiDi) ?? false);
+    }
+
+    static BorderInfo? ParagraphBorders(W.ParagraphBorders? borders)
+    {
+        if (borders == null) return null;
+        var top = Edge.From(borders.TopBorder);
+        var bottom = Edge.From(borders.BottomBorder);
+        var left = Edge.From(borders.LeftBorder);
+        var right = Edge.From(borders.RightBorder);
+        if (top.Width <= 0 && bottom.Width <= 0 && left.Width <= 0 && right.Width <= 0) return null;
+        return new BorderInfo(top.Width, top.Color, top.Style, bottom.Width, bottom.Color, bottom.Style,
+            left.Width, left.Color, left.Style, right.Width, right.Color, right.Style);
     }
 
     /// <summary>Column widths in points. Percentage widths need <paramref name="availableWidthPoints"/> to resolve.</summary>
@@ -206,8 +221,10 @@ internal static class WordHelpers
 
         string? fontFamily = null, color = null;
         double? size = null;
-        bool bold = false, italic = false, allCaps = false;
+        bool bold = false, italic = false, allCaps = false, strike = false, doubleStrike = false, hidden = false;
         W.Underline? underline = null;
+        string? highlight = null;
+        double letterSpacing = 0, widthScale = 1;
         var verticalAlignment = RunVerticalAlignment.Baseline;
 
         foreach (var layer in layers)
@@ -219,7 +236,14 @@ internal static class WordHelpers
             bold = IsToggleOn(layer.Bold) ?? bold;
             italic = IsToggleOn(layer.Italic) ?? italic;
             allCaps = IsToggleOn(layer.Caps) ?? allCaps;
+            strike = IsToggleOn(layer.Strike) ?? strike;
+            doubleStrike = IsToggleOn(layer.DoubleStrike) ?? doubleStrike;
+            hidden = IsToggleOn(layer.Vanish) ?? hidden;
             if (layer.Underline != null) underline = layer.Underline;
+            if (layer.Highlight?.Val != null) highlight = HighlightColor(layer.Highlight.Val.InnerText);
+            if (ColorUtils.TryParse(layer.Shading?.Fill?.Value, out _)) highlight = layer.Shading!.Fill!.Value;
+            if (layer.Spacing?.Val?.Value is { } spacing) letterSpacing = Units.TwipsToPoints(spacing);
+            if (layer.CharacterScale?.Val?.Value is { } scale && scale > 0) widthScale = scale / 100.0;
             if (layer.VerticalTextAlignment?.Val?.Value is { } vAlign)
             {
                 verticalAlignment =
@@ -237,8 +261,19 @@ internal static class WordHelpers
         var underlineOn = underline?.Val?.Value is { } style && style != W.UnderlineValues.None;
 
         return new RunFormat(fontFamily, color, bold, italic, underlineOn, size, boldSpecified,
-            MapUnderline(underline?.Val?.Value), verticalAlignment, allCaps);
+            MapUnderline(underline?.Val?.Value), verticalAlignment, allCaps,
+            doubleStrike ? StrikeStyle.Double : strike ? StrikeStyle.Single : StrikeStyle.None,
+            highlight, hidden, letterSpacing, widthScale);
     }
+
+    static string? HighlightColor(string? name) => name?.ToLowerInvariant() switch
+    {
+        "yellow" => "FFFF00", "green" => "00FF00", "cyan" => "00FFFF", "magenta" => "FF00FF",
+        "blue" => "0000FF", "red" => "FF0000", "darkblue" => "000080", "darkcyan" => "008080",
+        "darkgreen" => "008000", "darkmagenta" => "800080", "darkred" => "800000", "darkyellow" => "808000",
+        "darkgray" => "808080", "lightgray" => "C0C0C0", "black" => "000000", "white" => "FFFFFF",
+        _ => null,
+    };
 
     static string? ResolveFont(W.RunFonts? fonts, WordStyleCache? cache)
     {
@@ -253,16 +288,16 @@ internal static class WordHelpers
             : cache.ThemeFont;
     }
 
-    static Underline MapUnderline(W.UnderlineValues? value)
+    static UnderlineStyle MapUnderline(W.UnderlineValues? value)
     {
-        if (value is not { } v) return Underline.Single;
-        if (v == W.UnderlineValues.Words) return Underline.Words;
-        if (v == W.UnderlineValues.Dotted || v == W.UnderlineValues.DottedHeavy) return Underline.Dotted;
+        if (value is not { } v) return UnderlineStyle.Single;
+        if (v == W.UnderlineValues.Words) return UnderlineStyle.Words;
+        if (v == W.UnderlineValues.Dotted || v == W.UnderlineValues.DottedHeavy) return UnderlineStyle.Dotted;
         if (v == W.UnderlineValues.Dash || v == W.UnderlineValues.DashedHeavy
-            || v == W.UnderlineValues.DashLong || v == W.UnderlineValues.DashLongHeavy) return Underline.Dash;
-        if (v == W.UnderlineValues.DotDash || v == W.UnderlineValues.DashDotHeavy) return Underline.DotDash;
-        if (v == W.UnderlineValues.DotDotDash || v == W.UnderlineValues.DashDotDotHeavy) return Underline.DotDotDash;
-        return Underline.Single;
+            || v == W.UnderlineValues.DashLong || v == W.UnderlineValues.DashLongHeavy) return UnderlineStyle.Dash;
+        if (v == W.UnderlineValues.DotDash || v == W.UnderlineValues.DashDotHeavy) return UnderlineStyle.DotDash;
+        if (v == W.UnderlineValues.DotDotDash || v == W.UnderlineValues.DashDotDotHeavy) return UnderlineStyle.DotDotDash;
+        return UnderlineStyle.Single;
     }
 
     public static (string numFmt, string lvlText, int? startAt) GetNumberingLevelFormat(
@@ -383,7 +418,8 @@ internal static class WordHelpers
         public static Edge From(W.BorderType? border)
         {
             if (border == null) return None;
-            if (border.Val?.Value == W.BorderValues.None || border.Val?.Value == W.BorderValues.Nil) return None;
+            if (border.Val?.Value == W.BorderValues.None || border.Val?.Value == W.BorderValues.Nil)
+                return new Edge(0, null, border.Val.InnerText);
 
             var width = border.Size != null && border.Size.HasValue
                 ? Units.EighthPointsToPoints(border.Size.Value)

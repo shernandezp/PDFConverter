@@ -1,79 +1,96 @@
 using DocumentFormat.OpenXml;
 using DocumentFormat.OpenXml.Packaging;
-using MigraDoc.DocumentObjectModel;
-using MigraDoc.DocumentObjectModel.Shapes;
-using MigraDoc.Rendering;
-using PdfSharp.Drawing;
+using PDFConverter.Layout;
+using SkiaSharp;
 using W = DocumentFormat.OpenXml.Wordprocessing;
 
 namespace PDFConverter;
 
-internal readonly record struct PageArt(string Path, double Width, double Height);
-
 internal static class WordDocumentBuilder
 {
-    public static PdfDocumentRenderer Build(WordprocessingDocument word, TempImageStore images)
+    public static Document Build(WordprocessingDocument word, ImageStore images)
     {
-        OpenXmlHelpers.EnsureFontResolverInitialized();
-
         var ctx = new WordRenderContext(word, images);
         var body = ctx.MainPart.Document?.Body
             ?? throw new InvalidOperationException("Document body not found");
 
-        var document = new Document();
-        var section = document.AddSection();
-        var sectionProperties = body.Elements<W.SectionProperties>().LastOrDefault();
+        var properties = word.PackageProperties;
+        var document = new Document
+        {
+            Title = properties.Title, Author = properties.Creator, Subject = properties.Subject, Keywords = properties.Keywords,
+        };
 
-        ApplyPageSetup(section, sectionProperties);
+        var elements = Flatten(body).ToList();
+        var sectionProperties = elements.OfType<W.Paragraph>()
+            .Select(p => p.ParagraphProperties?.SectionProperties)
+            .Where(s => s != null)
+            .ToList();
+        sectionProperties.Add(body.Elements<W.SectionProperties>().LastOrDefault());
 
-        var backgrounds = new List<PageArt>();
-        RenderHeaders(ctx, section, sectionProperties, backgrounds);
-        RenderFooters(ctx, section, sectionProperties);
-        RenderBody(ctx, section, body, backgrounds);
-        ApplyDefaultFont(ctx, document);
+        var sections = new SectionCursor(ctx, document, sectionProperties);
+        var section = sections.Next();
+        foreach (var element in elements)
+        {
+            if (element is W.Paragraph paragraph)
+            {
+                RenderBodyParagraph(ctx, section, paragraph);
+                if (paragraph.ParagraphProperties?.SectionProperties != null && sections.HasNext)
+                    section = sections.Next();
+            }
+            else if (element is W.Table table)
+            {
+                WordTableRenderer.RenderTable(ctx, section, table);
+            }
+        }
+        return document;
+    }
 
-        var renderer = new PdfDocumentRenderer { Document = document };
-        renderer.RenderDocument();
+    // Each section carries its own page setup; headers and footers are inherited from the previous
+    // section when the section break does not reference any of its own.
+    sealed class SectionCursor(WordRenderContext ctx, Document document, List<W.SectionProperties?> properties)
+    {
+        int _index;
+        W.SectionProperties? _headerSource;
+        W.SectionProperties? _footerSource;
 
-        DrawBackgrounds(renderer, backgrounds);
-        PdfImageLinks.Apply(renderer.PdfDocument, ctx.HyperlinkedImages);
-        return renderer;
+        public bool HasNext => _index < properties.Count;
+
+        public Section Next()
+        {
+            var sectionProperties = properties[_index++];
+            if (sectionProperties?.Elements<W.HeaderReference>().Any() == true) _headerSource = sectionProperties;
+            if (sectionProperties?.Elements<W.FooterReference>().Any() == true) _footerSource = sectionProperties;
+
+            var section = document.AddSection();
+            ApplyPageSetup(section, sectionProperties);
+            RenderHeaders(ctx, section, _headerSource);
+            RenderFooters(ctx, section, _footerSource);
+            return section;
+        }
     }
 
     static void ApplyPageSetup(Section section, W.SectionProperties? sectionProperties)
     {
-        var pageSetup = section.PageSetup;
-        pageSetup.LeftMargin = Unit.FromCentimeter(LayoutDefaults.PageMarginCentimeters);
-        pageSetup.RightMargin = Unit.FromCentimeter(LayoutDefaults.PageMarginCentimeters);
+        section.LeftMargin = section.RightMargin = LayoutDefaults.PageMarginCentimeters / 2.54 * 72;
 
         var pageSize = sectionProperties?.GetFirstChild<W.PageSize>();
         if (pageSize?.Width is { HasValue: true } width)
-            pageSetup.PageWidth = Unit.FromPoint(Units.TwipsToPoints(width.Value));
+            section.PageWidth = Units.TwipsToPoints(width.Value);
         if (pageSize?.Height is { HasValue: true } height)
-            pageSetup.PageHeight = Unit.FromPoint(Units.TwipsToPoints(height.Value));
+            section.PageHeight = Units.TwipsToPoints(height.Value);
 
         var margin = sectionProperties?.GetFirstChild<W.PageMargin>();
         if (margin == null) return;
 
-        if (margin.Top is { HasValue: true } top)
-            pageSetup.TopMargin = Unit.FromPoint(Units.TwipsToPoints(top.Value));
-        if (margin.Bottom is { HasValue: true } bottom)
-            pageSetup.BottomMargin = Unit.FromPoint(Units.TwipsToPoints(bottom.Value));
-        if (margin.Left is { HasValue: true } left)
-            pageSetup.LeftMargin = Unit.FromPoint(Units.TwipsToPoints(left.Value));
-        if (margin.Right is { HasValue: true } right)
-            pageSetup.RightMargin = Unit.FromPoint(Units.TwipsToPoints(right.Value));
-        if (margin.Header is { HasValue: true } header)
-            pageSetup.HeaderDistance = Unit.FromPoint(Units.TwipsToPoints(header.Value));
-        if (margin.Footer is { HasValue: true } footer)
-            pageSetup.FooterDistance = Unit.FromPoint(Units.TwipsToPoints(footer.Value));
+        if (margin.Top is { HasValue: true } top) section.TopMargin = Units.TwipsToPoints(top.Value);
+        if (margin.Bottom is { HasValue: true } bottom) section.BottomMargin = Units.TwipsToPoints(bottom.Value);
+        if (margin.Left is { HasValue: true } left) section.LeftMargin = Units.TwipsToPoints(left.Value);
+        if (margin.Right is { HasValue: true } right) section.RightMargin = Units.TwipsToPoints(right.Value);
+        if (margin.Header is { HasValue: true } header) section.HeaderDistance = Units.TwipsToPoints(header.Value);
+        if (margin.Footer is { HasValue: true } footer) section.FooterDistance = Units.TwipsToPoints(footer.Value);
     }
 
-    static double ContentWidth(Section section) =>
-        section.PageSetup.PageWidth.Point - section.PageSetup.LeftMargin.Point - section.PageSetup.RightMargin.Point;
-
-    static void RenderHeaders(WordRenderContext ctx, Section section,
-        W.SectionProperties? sectionProperties, List<PageArt> backgrounds)
+    static void RenderHeaders(WordRenderContext ctx, Section section, W.SectionProperties? sectionProperties)
     {
         foreach (var reference in sectionProperties?.Elements<W.HeaderReference>() ?? [])
         {
@@ -81,8 +98,8 @@ internal static class WordDocumentBuilder
             if (string.IsNullOrEmpty(id)) continue;
             if (ctx.MainPart.GetPartById(id) is not HeaderPart { Header: not null } part) continue;
 
-            var container = Container(section.Headers, section, reference.Type?.InnerText);
-            RenderHeaderPart(ctx, section, part.Header, container, backgrounds);
+            var container = Container(section, reference.Type?.InnerText, isHeader: true);
+            RenderHeaderPart(ctx, section, part.Header, container);
         }
     }
 
@@ -94,32 +111,31 @@ internal static class WordDocumentBuilder
             if (string.IsNullOrEmpty(id)) continue;
             if (ctx.MainPart.GetPartById(id) is not FooterPart { Footer: not null } part) continue;
 
-            var container = Container(section.Footers, section, reference.Type?.InnerText);
+            var container = Container(section, reference.Type?.InnerText, isHeader: false);
             foreach (var paragraph in part.Footer.Elements<W.Paragraph>())
                 RenderHeaderFooterParagraph(ctx, paragraph, container);
         }
     }
 
-    static HeaderFooter Container(HeadersFooters collection, Section section, string? referenceType)
+    static HeaderFooter Container(Section section, string? referenceType, bool isHeader)
     {
         if (string.Equals(referenceType, "First", StringComparison.OrdinalIgnoreCase))
         {
-            section.PageSetup.DifferentFirstPageHeaderFooter = true;
-            return collection.FirstPage;
+            section.DifferentFirstPage = true;
+            return isHeader ? section.FirstPageHeader : section.FirstPageFooter;
         }
         if (string.Equals(referenceType, "Even", StringComparison.OrdinalIgnoreCase))
         {
-            section.PageSetup.OddAndEvenPagesHeaderFooter = true;
-            return collection.EvenPage;
+            section.OddAndEvenPages = true;
+            return isHeader ? section.EvenPageHeader : section.EvenPageFooter;
         }
-        return collection.Primary;
+        return isHeader ? section.PrimaryHeader : section.PrimaryFooter;
     }
 
-    static void RenderHeaderPart(WordRenderContext ctx, Section section, W.Header header,
-        HeaderFooter container, List<PageArt> backgrounds)
+    static void RenderHeaderPart(WordRenderContext ctx, Section section, W.Header header, HeaderFooter container)
     {
-        var pageWidth = section.PageSetup.PageWidth.Point;
-        var pageHeight = section.PageSetup.PageHeight.Point;
+        var pageWidth = section.PageWidth;
+        var pageHeight = section.PageHeight;
         double tallestImage = 0;
 
         bool IsArt(WordImage image) => IsPageArt(image, pageWidth, pageHeight);
@@ -128,7 +144,7 @@ internal static class WordDocumentBuilder
         {
             foreach (var image in ctx.ImagesIn(paragraph))
             {
-                if (IsArt(image)) CollectBackground(ctx, section, image, backgrounds);
+                if (IsArt(image)) CollectBackground(ctx, section, image);
                 else tallestImage = Math.Max(tallestImage, image.HeightPoints);
             }
 
@@ -140,7 +156,7 @@ internal static class WordDocumentBuilder
     }
 
     // A header picture sitting behind the text, or covering most of the page, is page art rather
-    // than header content: Word paints it under everything, MigraDoc has no equivalent.
+    // than header content: Word paints it under everything.
     static bool IsPageArt(WordImage image, double pageWidth, double pageHeight)
     {
         if (image.IsBackground) return true;
@@ -149,63 +165,43 @@ internal static class WordDocumentBuilder
             && image.HeightPoints > pageHeight * LayoutDefaults.FullPageImageRatio;
     }
 
-    static void CollectBackground(WordRenderContext ctx, Section section, WordImage image, List<PageArt> backgrounds)
+    static void CollectBackground(WordRenderContext ctx, Section section, WordImage image)
     {
-        var path = ctx.MaterializeImage(image);
-        if (path == null) return;
-        if (backgrounds.All(art => art.Path != path))
-            backgrounds.Add(new PageArt(path, image.WidthPoints, image.HeightPoints));
+        var source = ctx.MaterializeImage(image);
+        if (source == null) return;
+        if (section.Backgrounds.All(art => !ReferenceEquals(art.Image, source)))
+            section.Backgrounds.Add(new PageArt(source, image.WidthPoints, image.HeightPoints));
 
-        var pageHeight = section.PageSetup.PageHeight.Point;
+        var pageHeight = section.PageHeight;
         if (!image.ExtentCyEmu.HasValue || pageHeight <= 0) return;
 
         // A band across the top is header art, not a full-page backdrop: keep body text clear of it.
         var imageHeight = image.HeightPoints;
         if (imageHeight / pageHeight >= LayoutDefaults.HeaderBackgroundPageRatio) return;
 
-        var available = Math.Max(0, pageHeight - section.PageSetup.TopMargin.Point
-            - section.PageSetup.BottomMargin.Point - 10.0);
+        var available = Math.Max(0, pageHeight - section.TopMargin - section.BottomMargin - 10.0);
         var headerHeight = Math.Min(imageHeight, available);
-        if (section.PageSetup.HeaderDistance.Point < headerHeight)
-            section.PageSetup.HeaderDistance = Unit.FromPoint(headerHeight);
+        if (section.HeaderDistance < headerHeight) section.HeaderDistance = headerHeight;
     }
 
     static void ReserveHeaderSpace(Section section, double tallestImage)
     {
         if (tallestImage <= 0) return;
-        var needed = section.PageSetup.HeaderDistance.Point + tallestImage + LayoutDefaults.HeaderBodyGapPoints;
-        if (section.PageSetup.TopMargin.Point < needed)
-            section.PageSetup.TopMargin = Unit.FromPoint(needed);
+        var needed = section.HeaderDistance + tallestImage + LayoutDefaults.HeaderBodyGapPoints;
+        if (section.TopMargin < needed) section.TopMargin = needed;
     }
 
     static void RenderHeaderFooterParagraph(WordRenderContext ctx, W.Paragraph source,
         HeaderFooter container, InlineOptions options = default)
     {
         var format = WordHelpers.GetParagraphFormatting(source.ParagraphProperties);
-        var target = container.AddParagraph();
-        target.Format.Alignment = format.Alignment;
-        if (format.SpacingBefore > 0) target.Format.SpaceBefore = Unit.FromPoint(format.SpacingBefore);
-        if (format.SpacingAfter > 0) target.Format.SpaceAfter = Unit.FromPoint(format.SpacingAfter);
+        var target = ctx.Prepare(new Paragraph());
+        container.Blocks.Add(target);
+        target.Alignment = format.Alignment;
+        if (format.SpacingBefore > 0) target.SpaceBefore = format.SpacingBefore;
+        if (format.SpacingAfter > 0) target.SpaceAfter = format.SpacingAfter;
 
         WordContentRenderer.Render(ctx, source, source, target, options);
-    }
-
-    static void RenderBody(WordRenderContext ctx, Section section, W.Body body, List<PageArt> backgrounds)
-    {
-        var atTopOfPage = true;
-        foreach (var element in Flatten(body))
-        {
-            if (element is W.Paragraph paragraph)
-            {
-                RenderBodyParagraph(ctx, section, paragraph, backgrounds, atTopOfPage);
-                atTopOfPage = false;
-            }
-            else if (element is W.Table table)
-            {
-                WordTableRenderer.RenderTable(ctx, section, table);
-                atTopOfPage = false;
-            }
-        }
     }
 
     static IEnumerable<OpenXmlElement> Flatten(OpenXmlElement container)
@@ -224,32 +220,26 @@ internal static class WordDocumentBuilder
         }
     }
 
-    static void RenderBodyParagraph(WordRenderContext ctx, Section section, W.Paragraph source,
-        List<PageArt> backgrounds, bool atTopOfPage)
+    static void RenderBodyParagraph(WordRenderContext ctx, Section section, W.Paragraph source)
     {
         var format = ResolveParagraphFormat(ctx, source);
 
         foreach (var image in ctx.ImagesIn(source))
         {
-            if (image.IsPositionedAnchor) AddFloatingImage(ctx, section, image, atTopOfPage);
-            else if (image.IsBackground) CollectBackground(ctx, section, image, backgrounds);
+            if (image.IsPositionedAnchor) AddFloatingImage(ctx, section, image);
+            else if (image.IsBackground) CollectBackground(ctx, section, image);
         }
 
         foreach (var line in WordLineExtractor.Extract(source))
-            AddFloatingLine(section, line, atTopOfPage);
+            AddFloatingLine(section, line);
 
-        // MigraDoc drops SpaceBefore on the first paragraph of a section, where Word applies it, so
-        // it is added to the top margin instead.
-        if (atTopOfPage && format.SpaceBefore is > 0)
-            section.PageSetup.TopMargin += Unit.FromPoint(format.SpaceBefore.Value);
-
-        var target = section.AddParagraph();
-        ApplyParagraphFormat(target, format, section);
+        var target = ctx.Prepare(section.AddParagraph());
+        ApplyParagraphFormat(target, format);
 
         var label = ListLabel(ctx, source);
-        if (label != null) target.AddText(label);
+        if (label != null) target.Add(new TextRun(label, target.DefaultStyle));
 
-        var added = WordContentRenderer.Render(ctx, source, source, target,
+        WordContentRenderer.Render(ctx, source, source, target,
             new InlineOptions(SkipImage: image => image.IsPositionedAnchor || image.IsBackground));
 
         var pictures = source.Elements<W.Run>()
@@ -258,91 +248,74 @@ internal static class WordDocumentBuilder
             .ToList();
         if (pictures.Count > 0) VmlTextBoxRenderer.Render(ctx, pictures!, section);
 
-        if (!added && label == null)
-            target.AddFormattedText(" ").Size = format.FontSize;
+        // An empty paragraph is as tall as its mark, which carries the size of the surrounding text.
+        if (target.IsEmpty) target.DefaultStyle = target.DefaultStyle with { Size = format.FontSize };
     }
 
-    // MigraDoc ignores a Top offset for paragraph-relative shapes but honours it for margin-relative
-    // ones, and on the first block the paragraph top is the margin top.
-    static RelativeVertical VerticalAnchor(WordImage info, bool atTopOfPage) =>
-        info.VerticalRelativeFrom?.ToLowerInvariant() switch
+    static RelativeVertical VerticalAnchor(string? relativeFrom) => relativeFrom?.ToLowerInvariant() switch
+    {
+        "page" => RelativeVertical.Page,
+        "margin" => RelativeVertical.Margin,
+        _ => RelativeVertical.Paragraph,
+    };
+
+    static RelativeHorizontal HorizontalAnchor(string? relativeFrom) =>
+        relativeFrom?.ToLowerInvariant() == "page" ? RelativeHorizontal.Page : RelativeHorizontal.Margin;
+
+    static void AddFloatingLine(Section section, WordLine line)
+    {
+        section.Blocks.Add(new FloatingBlock
         {
-            "page" => RelativeVertical.Page,
-            "margin" => RelativeVertical.Margin,
-            _ => atTopOfPage ? RelativeVertical.Margin : RelativeVertical.Paragraph,
+            LineColor = ColorUtils.TryParse(line.Color, out var color) ? color : SKColors.Black,
+            LineWidth = LayoutDefaults.BorderWidthPoints,
+            Left = line.LeftPoints,
+            Top = line.TopPoints,
+            Width = line.LengthPoints,
+            RelativeHorizontal = HorizontalAnchor(line.HorizontalRelativeFrom),
+            RelativeVertical = VerticalAnchor(line.VerticalRelativeFrom),
+        });
+    }
+
+    static void AddFloatingImage(WordRenderContext ctx, Section section, WordImage info)
+    {
+        var image = ctx.MaterializeImage(info);
+        if (image == null) return;
+
+        var width = info.WidthPoints;
+        var height = WordContentRenderer.ScaledHeight(info, width) ?? image.HeightFor(width);
+
+        section.Blocks.Add(new FloatingBlock
+        {
+            Image = image,
+            Url = info.HyperlinkUrl,
+            Left = Units.EmuToPoints(info.OffsetXEmu ?? 0),
+            Top = Units.EmuToPoints(info.OffsetYEmu ?? 0),
+            Width = width,
+            Height = height,
+            RelativeHorizontal = HorizontalAnchor(info.HorizontalRelativeFrom),
+            RelativeVertical = VerticalAnchor(info.VerticalRelativeFrom),
+            ReservesSpace = info.WrapKind == "wrapTopAndBottom",
+            WrapSide = WrapSideOf(info),
+            DistanceTop = info.DistanceTop,
+            DistanceBottom = info.DistanceBottom,
+            DistanceLeft = info.DistanceLeft,
+            DistanceRight = info.DistanceRight,
+        });
+    }
+
+    static WrapSide WrapSideOf(WordImage info)
+    {
+        if (info.WrapKind is not ("wrapSquare" or "wrapTight" or "wrapThrough")) return WrapSide.None;
+        return info.WrapText?.ToLowerInvariant() switch
+        {
+            "left" => WrapSide.Left,
+            "right" => WrapSide.Right,
+            "largest" => WrapSide.Largest,
+            _ => WrapSide.Both,
         };
-
-    // MigraDoc has no line shape, so a rule is drawn as the bottom border of an empty frame. The
-    // frame's height carries the vertical offset, which also sidesteps the ignored Top on a
-    // paragraph-relative anchor.
-    static void AddFloatingLine(Section section, WordLine line, bool atTopOfPage)
-    {
-        try
-        {
-            var frame = section.AddTextFrame();
-            frame.Width = Unit.FromPoint(line.LengthPoints);
-            frame.Height = Unit.FromPoint(Math.Max(line.TopPoints, 0) + 4);
-            frame.WrapFormat.Style = WrapStyle.Through;
-            frame.RelativeHorizontal = line.HorizontalRelativeFrom?.ToLowerInvariant() == "page"
-                ? RelativeHorizontal.Page
-                : RelativeHorizontal.Margin;
-            frame.RelativeVertical = line.VerticalRelativeFrom?.ToLowerInvariant() switch
-            {
-                "page" => RelativeVertical.Page,
-                "margin" => RelativeVertical.Margin,
-                _ => atTopOfPage ? RelativeVertical.Margin : RelativeVertical.Paragraph,
-            };
-            frame.Left = Unit.FromPoint(line.LeftPoints);
-            if (frame.RelativeVertical != RelativeVertical.Paragraph)
-                frame.Top = Unit.FromPoint(0);
-
-            var rule = frame.AddParagraph();
-            rule.Format.Font.Size = 1;
-            rule.Format.SpaceBefore = Unit.FromPoint(Math.Max(line.TopPoints, 0));
-            rule.Format.SpaceAfter = 0;
-            rule.Format.Borders.Top.Width = Unit.FromPoint(LayoutDefaults.BorderWidthPoints);
-            rule.Format.Borders.Top.Color =
-                ColorUtils.TryParse(line.Color, out var color) ? color : Colors.Black;
-        }
-        catch (Exception ex)
-        {
-            OpenXmlHelpers.ImageLoadLogger?.Invoke($"Failed adding connector line: {ex.Message}");
-        }
     }
 
-    static void AddFloatingImage(WordRenderContext ctx, Section section, WordImage info, bool atTopOfPage)
-    {
-        var path = ctx.MaterializeImage(info);
-        if (path == null) return;
-
-        try
-        {
-            var image = section.AddImage(path);
-            WordContentRenderer.SetSize(image, info, info.WidthPoints, info.HeightPoints);
-            image.RelativeHorizontal = info.HorizontalRelativeFrom?.ToLowerInvariant() switch
-            {
-                "page" => RelativeHorizontal.Page,
-                _ => RelativeHorizontal.Margin,
-            };
-            image.RelativeVertical = VerticalAnchor(info, atTopOfPage);
-
-            // MigraDoc cannot flow text beside a shape, and reserving a full-width band for a square
-            // wrap displaces text far more than floating the shape loses in vertical offset.
-            image.WrapFormat.Style = info.WrapKind == "wrapTopAndBottom"
-                ? WrapStyle.TopBottom
-                : WrapStyle.Through;
-            image.Left = Unit.FromPoint(Units.EmuToPoints(info.OffsetXEmu ?? 0));
-            image.Top = Unit.FromPoint(Units.EmuToPoints(info.OffsetYEmu ?? 0));
-
-            ctx.TrackHyperlinkedImage(info.HyperlinkUrl, info.WidthPoints, info.HeightPoints);
-        }
-        catch (Exception ex)
-        {
-            OpenXmlHelpers.ImageLoadLogger?.Invoke($"Failed adding floating image '{path}': {ex.Message}");
-        }
-    }
-
-    static string? ListLabel(WordRenderContext ctx, W.Paragraph source)
+    internal static string? ListLabel(WordRenderContext ctx, W.Paragraph source)
     {
         var numbering = source.ParagraphProperties?.NumberingProperties;
         var numId = numbering?.NumberingId?.Val?.Value;
@@ -364,7 +337,12 @@ internal static class WordDocumentBuilder
         bool PageBreakBefore,
         string? ShadingColor,
         double FontSize,
-        W.Tabs? Tabs);
+        W.Tabs? Tabs,
+        BorderInfo? Borders,
+        bool KeepNext,
+        bool KeepLines,
+        bool WidowControl,
+        bool RightToLeft);
 
     static EffectiveParagraphFormat ResolveParagraphFormat(WordRenderContext ctx, W.Paragraph source)
     {
@@ -378,7 +356,11 @@ internal static class WordDocumentBuilder
             WordHelpers.GetStyleParagraphProperties(ctx.MainPart, "Normal"));
         var docDefaults = WordHelpers.GetParagraphFormatting(ctx.Styles.DocDefaultsParagraphProperties);
 
+        var rightToLeft = direct.Bidi || style.Bidi;
         var alignment = pPr?.Justification != null ? direct.Alignment : style.Alignment;
+        if (rightToLeft) alignment = pPr?.Justification == null && style.Alignment == ParagraphAlignment.Left
+            ? ParagraphAlignment.Right
+            : MirrorForRightToLeft(alignment);
 
         var leftIndent = style.LeftIndent;
         var rightIndent = style.RightIndent;
@@ -412,8 +394,21 @@ internal static class WordDocumentBuilder
             direct.PageBreakBefore || style.PageBreakBefore,
             direct.ShadingColor ?? style.ShadingColor,
             ResolveFontSize(ctx, source, styleId),
-            pPr?.GetFirstChild<W.Tabs>());
+            pPr?.GetFirstChild<W.Tabs>(),
+            direct.Borders ?? style.Borders,
+            direct.KeepNext ?? style.KeepNext ?? false,
+            direct.KeepLines ?? style.KeepLines ?? false,
+            direct.WidowControl ?? style.WidowControl ?? normal.WidowControl ?? docDefaults.WidowControl ?? true,
+            rightToLeft);
     }
+
+    // In a bidi paragraph Word treats left and right as logical start and end.
+    internal static ParagraphAlignment MirrorForRightToLeft(ParagraphAlignment alignment) => alignment switch
+    {
+        ParagraphAlignment.Left => ParagraphAlignment.Right,
+        ParagraphAlignment.Right => ParagraphAlignment.Left,
+        _ => alignment,
+    };
 
     static double ResolveFontSize(WordRenderContext ctx, W.Paragraph source, string? styleId)
     {
@@ -439,100 +434,58 @@ internal static class WordDocumentBuilder
         return LayoutDefaults.FontSizePoints;
     }
 
-    static void ApplyParagraphFormat(Paragraph target, EffectiveParagraphFormat format, Section section)
+    static void ApplyParagraphFormat(Paragraph target, EffectiveParagraphFormat format)
     {
-        var f = target.Format;
-        f.Alignment = format.Alignment;
-        if (format.LeftIndent > 0) f.LeftIndent = Unit.FromPoint(format.LeftIndent);
-        if (format.RightIndent > 0) f.RightIndent = Unit.FromPoint(format.RightIndent);
-        if (format.FirstLineIndent != 0) f.FirstLineIndent = Unit.FromPoint(format.FirstLineIndent);
-        if (format.SpaceBefore.HasValue) f.SpaceBefore = Unit.FromPoint(format.SpaceBefore.Value);
-        if (format.SpaceAfter.HasValue) f.SpaceAfter = Unit.FromPoint(format.SpaceAfter.Value);
-        f.PageBreakBefore = format.PageBreakBefore;
-        if (ColorUtils.TryParse(format.ShadingColor, out var shading)) f.Shading.Color = shading;
+        target.Alignment = format.Alignment;
+        if (format.LeftIndent > 0) target.LeftIndent = format.LeftIndent;
+        if (format.RightIndent > 0) target.RightIndent = format.RightIndent;
+        if (format.FirstLineIndent != 0) target.FirstLineIndent = format.FirstLineIndent;
+        if (format.SpaceBefore.HasValue) target.SpaceBefore = format.SpaceBefore.Value;
+        if (format.SpaceAfter.HasValue) target.SpaceAfter = format.SpaceAfter.Value;
+        target.PageBreakBefore = format.PageBreakBefore;
+        target.KeepWithNext = format.KeepNext;
+        target.KeepTogether = format.KeepLines;
+        target.WidowControl = format.WidowControl;
+        target.RightToLeft = format.RightToLeft;
+        if (ColorUtils.TryParse(format.ShadingColor, out var shading)) target.Shading = shading;
+        if (format.Borders is { } borders) target.Borders = ToBorders(borders);
 
-        ApplyLineSpacing(f, format);
-        ApplyTabStops(f, format.Tabs, ContentWidth(section));
-    }
-
-    static void ApplyLineSpacing(MigraDoc.DocumentObjectModel.ParagraphFormat target, EffectiveParagraphFormat format)
-    {
-        if (format.LineSpacing is not { } spacing || spacing <= 0) return;
-
-        switch (format.LineRule?.ToLowerInvariant())
+        if (format.LineSpacing is { } spacing && spacing > 0)
         {
-            case "exact":
-                target.LineSpacing = Unit.FromPoint(spacing);
-                target.LineSpacingRule = LineSpacingRule.Exactly;
-                break;
-            case "atleast":
-                target.LineSpacing = Unit.FromPoint(spacing);
-                target.LineSpacingRule = LineSpacingRule.AtLeast;
-                break;
-            default:
-                target.LineSpacing = spacing;
-                target.LineSpacingRule = LineSpacingRule.Multiple;
-                break;
-        }
-    }
-
-    static void ApplyTabStops(MigraDoc.DocumentObjectModel.ParagraphFormat target, W.Tabs? tabs, double contentWidth)
-    {
-        if (tabs != null)
-        {
-            foreach (var tab in tabs.Elements<W.TabStop>())
+            target.LineSpacing = spacing;
+            target.LineSpacingRule = format.LineRule?.ToLowerInvariant() switch
             {
-                if (tab.Position?.HasValue != true) continue;
-                var alignment =
-                    tab.Val?.Value == W.TabStopValues.Center ? TabAlignment.Center :
-                    tab.Val?.Value == W.TabStopValues.Right ? TabAlignment.Right :
-                    TabAlignment.Left;
-                target.TabStops.AddTabStop(Unit.FromPoint(Units.TwipsToPoints(tab.Position.Value)), alignment);
-            }
-            return;
+                "exact" => LineSpacingRule.Exactly,
+                "atleast" => LineSpacingRule.AtLeast,
+                _ => LineSpacingRule.Multiple,
+            };
         }
 
-        for (var position = LayoutDefaults.TabStopIntervalPoints; position < contentWidth;
-             position += LayoutDefaults.TabStopIntervalPoints)
-            target.TabStops.AddTabStop(Unit.FromPoint(position));
-    }
-
-    static void ApplyDefaultFont(WordRenderContext ctx, Document document)
-    {
-        var normal = document.Styles["Normal"];
-        if (normal == null) return;
-
-        var defaults = ctx.Styles.DocDefaultsRunProperties;
-        normal.Font.Name = WordHelpers.GetRunFontFamily(defaults)
-            ?? ctx.Styles.ThemeFont
-            ?? ctx.UsedFonts.FirstOrDefault()
-            ?? "Arial";
-
-        if (Units.HalfPointsToPoints(defaults?.FontSize?.Val?.Value) is { } size)
-            normal.Font.Size = size;
-    }
-
-    static void DrawBackgrounds(PdfDocumentRenderer renderer, List<PageArt> backgrounds)
-    {
-        if (backgrounds.Count == 0) return;
-
-        foreach (var page in renderer.PdfDocument.Pages)
+        if (format.Tabs == null) return;
+        target.TabStops = [];
+        foreach (var tab in format.Tabs.Elements<W.TabStop>())
         {
-            using var graphics = XGraphics.FromPdfPage(page, XGraphicsPdfPageOptions.Prepend);
-            foreach (var art in backgrounds)
-            {
-                try
-                {
-                    using var image = XImage.FromFile(art.Path);
-                    var width = art.Width > 0 ? art.Width : page.Width.Point;
-                    var height = art.Height > 0 ? art.Height : page.Height.Point;
-                    graphics.DrawImage(image, 0, 0, width, height);
-                }
-                catch (Exception ex)
-                {
-                    OpenXmlHelpers.ImageLoadLogger?.Invoke($"Failed drawing background '{art.Path}': {ex.Message}");
-                }
-            }
+            if (tab.Position?.HasValue != true) continue;
+            var alignment =
+                tab.Val?.Value == W.TabStopValues.Center ? TabAlignment.Center :
+                tab.Val?.Value == W.TabStopValues.Right ? TabAlignment.Right :
+                TabAlignment.Left;
+            target.TabStops.Add(new TabStop(Units.TwipsToPoints(tab.Position.Value), alignment));
         }
+    }
+
+    static Borders ToBorders(BorderInfo info) => new()
+    {
+        Top = Edge(info.TopWidth, info.TopColor, info.TopStyle),
+        Bottom = Edge(info.BottomWidth, info.BottomColor, info.BottomStyle),
+        Left = Edge(info.LeftWidth, info.LeftColor, info.LeftStyle),
+        Right = Edge(info.RightWidth, info.RightColor, info.RightStyle),
+    };
+
+    static BorderEdge? Edge(double width, string? colorValue, string? style)
+    {
+        if (width <= 0) return null;
+        return new BorderEdge(width, ColorUtils.TryParse(colorValue, out var color) ? color : SKColors.Black,
+            BorderPatterns.From(style));
     }
 }

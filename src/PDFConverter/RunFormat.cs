@@ -1,4 +1,4 @@
-using MigraDoc.DocumentObjectModel;
+using PDFConverter.Layout;
 
 namespace PDFConverter;
 
@@ -12,21 +12,29 @@ internal sealed record RunFormat(
     bool Underline,
     double? Size,
     bool BoldSpecified = false,
-    Underline UnderlineStyle = MigraDoc.DocumentObjectModel.Underline.Single,
+    UnderlineStyle UnderlineStyle = UnderlineStyle.Single,
     RunVerticalAlignment VerticalAlignment = RunVerticalAlignment.Baseline,
-    bool AllCaps = false)
+    bool AllCaps = false,
+    StrikeStyle Strike = StrikeStyle.None,
+    string? Highlight = null,
+    bool Hidden = false,
+    double LetterSpacing = 0,
+    double WidthScale = 1)
 {
-    internal void ApplyTo(FormattedText formatted)
+    internal TextStyle ToTextStyle(TextStyle defaults) => new(
+        string.IsNullOrEmpty(FontFamily) ? defaults.FontFamily : FontFamily,
+        Size ?? defaults.Size,
+        Bold,
+        Italic,
+        ColorUtils.TryParse(Color, out var color) ? color : defaults.Color,
+        Underline ? UnderlineStyle : null,
+        VerticalAlignment)
     {
-        if (Size.HasValue) formatted.Size = Size.Value;
-        if (!string.IsNullOrEmpty(FontFamily)) formatted.Font.Name = FontFamily;
-        if (ColorUtils.TryParse(Color, out var color)) formatted.Color = color;
-        if (Bold) formatted.Bold = true;
-        if (Italic) formatted.Italic = true;
-        if (Underline) formatted.Underline = UnderlineStyle;
-        if (VerticalAlignment == RunVerticalAlignment.Superscript) formatted.Superscript = true;
-        else if (VerticalAlignment == RunVerticalAlignment.Subscript) formatted.Subscript = true;
-    }
+        Strike = Strike,
+        Highlight = ColorUtils.TryParse(Highlight, out var highlight) ? highlight : null,
+        LetterSpacing = LetterSpacing,
+        WidthScale = WidthScale > 0 ? WidthScale : 1,
+    };
 
     internal string TransformText(string text) => AllCaps ? text.ToUpperInvariant() : text;
 }

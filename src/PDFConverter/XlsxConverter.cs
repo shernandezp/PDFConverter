@@ -1,6 +1,5 @@
 using DocumentFormat.OpenXml.Packaging;
-using MigraDoc.DocumentObjectModel;
-using MigraDoc.Rendering;
+using PDFConverter.Layout;
 using S = DocumentFormat.OpenXml.Spreadsheet;
 
 namespace PDFConverter;
@@ -49,29 +48,39 @@ public static class XlsxConverter
 
     static void XlsxToPdfInternal(SpreadsheetDocument spreadsheet, string pdfPath)
     {
-        using var images = new TempImageStore();
-        BuildRenderer(spreadsheet, images).Save(pdfPath);
+        using var output = File.Create(pdfPath);
+        Render(spreadsheet, output);
     }
 
     static byte[] RenderToBytes(SpreadsheetDocument spreadsheet)
     {
-        using var images = new TempImageStore();
-        var renderer = BuildRenderer(spreadsheet, images);
         using var output = new MemoryStream();
-        renderer.Save(output, false);
+        Render(spreadsheet, output);
         return output.ToArray();
     }
 
-    static PdfDocumentRenderer BuildRenderer(SpreadsheetDocument spreadsheet, TempImageStore images)
+    static void Render(SpreadsheetDocument spreadsheet, Stream output)
     {
         OpenXmlHelpers.EnsureFontResolverInitialized();
+        using var images = new ImageStore();
+        var document = BuildDocument(spreadsheet, images);
+        using var engine = new LayoutEngine(FontRegistry.Current);
+        var pages = engine.Layout(document);
+        SkiaPdfWriter.Write(pages, output, document);
+    }
 
+    static Document BuildDocument(SpreadsheetDocument spreadsheet, ImageStore images)
+    {
         var workbookPart = spreadsheet.WorkbookPart
             ?? throw new InvalidOperationException("The workbook has no content.");
         var sheets = workbookPart.Workbook?.Sheets?.Elements<S.Sheet>().ToList() ?? [];
         if (sheets.Count == 0) throw new InvalidOperationException("No sheets found");
 
-        var document = new Document();
+        var properties = spreadsheet.PackageProperties;
+        var document = new Document
+        {
+            Title = properties.Title, Author = properties.Creator, Subject = properties.Subject, Keywords = properties.Keywords,
+        };
 
         foreach (var sheet in sheets)
         {
@@ -89,10 +98,7 @@ public static class XlsxConverter
         }
 
         if (document.Sections.Count == 0) document.AddSection();
-
-        var renderer = new PdfDocumentRenderer { Document = document };
-        renderer.RenderDocument();
-        return renderer;
+        return document;
     }
 
     static bool IsHidden(S.Sheet sheet) =>
@@ -100,37 +106,33 @@ public static class XlsxConverter
 
     static void ApplyPageSetup(Section section, S.Worksheet worksheet)
     {
-        var pageSetup = section.PageSetup;
         var margins = worksheet.Elements<S.PageMargins>().FirstOrDefault();
 
         if (margins != null)
         {
-            pageSetup.LeftMargin = Margin(margins.Left?.Value);
-            pageSetup.RightMargin = Margin(margins.Right?.Value);
-            pageSetup.TopMargin = Margin(margins.Top?.Value);
-            pageSetup.BottomMargin = Margin(margins.Bottom?.Value);
+            section.LeftMargin = Margin(margins.Left?.Value);
+            section.RightMargin = Margin(margins.Right?.Value);
+            section.TopMargin = Margin(margins.Top?.Value);
+            section.BottomMargin = Margin(margins.Bottom?.Value);
         }
         else
         {
-            var fallback = Unit.FromCentimeter(LayoutDefaults.ExcelPageMarginCentimeters);
-            pageSetup.LeftMargin = pageSetup.RightMargin = fallback;
-            pageSetup.TopMargin = pageSetup.BottomMargin = fallback;
+            var fallback = LayoutDefaults.ExcelPageMarginCentimeters / 2.54 * 72;
+            section.LeftMargin = section.RightMargin = fallback;
+            section.TopMargin = section.BottomMargin = fallback;
         }
 
         var printSetup = worksheet.Elements<S.PageSetup>().FirstOrDefault();
         var (width, height) = PaperSize(printSetup?.PaperSize?.Value);
-
-        // MigraDoc ignores Orientation once the page size is set explicitly, so swap it here.
         if (printSetup?.Orientation?.Value == S.OrientationValues.Landscape)
             (width, height) = (height, width);
 
-        pageSetup.PageWidth = Unit.FromPoint(width);
-        pageSetup.PageHeight = Unit.FromPoint(height);
+        section.PageWidth = width;
+        section.PageHeight = height;
     }
 
-    static Unit Margin(double? inches) =>
-        Unit.FromInch(Math.Max(inches ?? LayoutDefaults.ExcelMinPageMarginInches,
-            LayoutDefaults.ExcelMinPageMarginInches));
+    static double Margin(double? inches) =>
+        Math.Max(inches ?? LayoutDefaults.ExcelMinPageMarginInches, LayoutDefaults.ExcelMinPageMarginInches) * 72;
 
     static (double Width, double Height) PaperSize(uint? paperSize) => paperSize switch
     {
