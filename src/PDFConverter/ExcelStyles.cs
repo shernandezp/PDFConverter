@@ -109,7 +109,8 @@ internal sealed class ExcelStyles
             ReadFill(format.FillId?.Value),
             format.NumberFormatId?.Value,
             ReadBorders(format.BorderId?.Value),
-            fontFamily, fontSize, fontColor, bold, italic);
+            fontFamily, fontSize, fontColor, bold, italic,
+            format.Alignment?.WrapText?.Value == true);
 
         _resolved[index] = resolved;
         return resolved;

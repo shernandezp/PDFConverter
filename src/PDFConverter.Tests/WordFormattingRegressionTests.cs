@@ -1,8 +1,5 @@
 using DocumentFormat.OpenXml;
 using DocumentFormat.OpenXml.Packaging;
-using PdfSharp.Pdf.Content;
-using PdfSharp.Pdf.Content.Objects;
-using PdfSharp.Pdf.IO;
 using Xunit;
 using W = DocumentFormat.OpenXml.Wordprocessing;
 using DW = DocumentFormat.OpenXml.Drawing.Wordprocessing;
@@ -153,10 +150,7 @@ public class WordFormattingRegressionTests
     [Fact]
     public void DocxToPdfBytes_ManualPageBreak_StartsASecondPage()
     {
-        using var ms = new MemoryStream(Converters.DocxToPdfBytes(BuildDocumentWithPageBreak()));
-        using var pdf = PdfReader.Open(ms, PdfDocumentOpenMode.Import);
-
-        Assert.Equal(2, pdf.PageCount);
+        Assert.Equal(2, PdfProbe.PageCount(Converters.DocxToPdfBytes(BuildDocumentWithPageBreak())));
     }
 
     [Fact]
@@ -199,10 +193,7 @@ public class WordFormattingRegressionTests
     [Fact]
     public void DocxToPdfBytes_ParagraphsWithNoSpacing_DoNotGainAnEightPointGap()
     {
-        using var ms = new MemoryStream(Converters.DocxToPdfBytes(BuildDocumentWithEmptyParagraphs(30)));
-        using var pdf = PdfReader.Open(ms, PdfDocumentOpenMode.Import);
-
-        Assert.Equal(1, pdf.PageCount);
+        Assert.Equal(1, PdfProbe.PageCount(Converters.DocxToPdfBytes(BuildDocumentWithEmptyParagraphs(30))));
     }
 
     [Fact]
@@ -269,40 +260,8 @@ public class WordFormattingRegressionTests
     static byte[] SquarePng() => Convert.FromBase64String(
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==");
 
-    static List<(double Width, double Height)> ExtractImagePlacements(byte[] pdfBytes)
-    {
-        var placements = new List<(double, double)>();
-        using var ms = new MemoryStream(pdfBytes);
-        using var pdf = PdfReader.Open(ms, PdfDocumentOpenMode.Import);
-        foreach (var page in pdf.Pages) WalkImages(ContentReader.ReadContent(page), placements, new double[2]);
-        return placements;
-    }
-
-    static void WalkImages(CSequence sequence, List<(double, double)> placements, double[] lastTransform)
-    {
-        foreach (var item in sequence)
-        {
-            if (item is CSequence nested) { WalkImages(nested, placements, lastTransform); continue; }
-            if (item is not COperator op) continue;
-
-            if (op.OpCode.Name == "cm" && op.Operands.Count >= 6)
-            {
-                lastTransform[0] = Operand(op.Operands[0]);
-                lastTransform[1] = Operand(op.Operands[3]);
-            }
-            else if (op.OpCode.Name == "Do")
-            {
-                placements.Add((lastTransform[0], Math.Abs(lastTransform[1])));
-            }
-        }
-    }
-
-    static double Operand(CObject value) => value switch
-    {
-        CReal real => real.Value,
-        CInteger integer => integer.Value,
-        _ => 0,
-    };
+    static List<(double Width, double Height)> ExtractImagePlacements(byte[] pdfBytes) =>
+        PdfProbe.Images(pdfBytes).Select(image => (image.Width, image.Height)).ToList();
 
     [Fact]
     public void DocDefaults_AsWrittenByWord_AreRead()
@@ -368,30 +327,5 @@ public class WordFormattingRegressionTests
         return ms.ToArray();
     }
 
-    static List<string> ExtractTexts(byte[] pdfBytes)
-    {
-        var texts = new List<string>();
-        using var ms = new MemoryStream(pdfBytes);
-        using var pdf = PdfReader.Open(ms, PdfDocumentOpenMode.Import);
-        foreach (var page in pdf.Pages) Walk(ContentReader.ReadContent(page), texts);
-        return texts;
-    }
-
-    static void Walk(CSequence sequence, List<string> texts)
-    {
-        foreach (var item in sequence)
-        {
-            if (item is CSequence nested) { Walk(nested, texts); continue; }
-            if (item is not COperator op || op.OpCode.Name is not ("Tj" or "TJ")) continue;
-            if (op.Operands.Count == 0) continue;
-
-            var text = string.Empty;
-            if (op.Operands[0] is CString s) text = s.Value;
-            else if (op.Operands[0] is CArray array)
-                foreach (var element in array)
-                    if (element is CString cs) text += cs.Value;
-
-            if (!string.IsNullOrWhiteSpace(text)) texts.Add(text.Trim());
-        }
-    }
+    static List<string> ExtractTexts(byte[] pdfBytes) => PdfProbe.Words(pdfBytes);
 }

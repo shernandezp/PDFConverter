@@ -1,9 +1,6 @@
 using DocumentFormat.OpenXml;
 using DocumentFormat.OpenXml.Packaging;
 using DocumentFormat.OpenXml.Wordprocessing;
-using PdfSharp.Pdf.Content;
-using PdfSharp.Pdf.Content.Objects;
-using PdfSharp.Pdf.IO;
 using Xunit;
 using W = DocumentFormat.OpenXml.Wordprocessing;
 
@@ -32,19 +29,6 @@ public class DocxConverterIntegrationTests : IDisposable
         return path;
     }
 
-    private static int GetPdfPageCount(byte[] pdfBytes)
-    {
-        using var ms = new MemoryStream(pdfBytes);
-        using var pdf = PdfReader.Open(ms, PdfDocumentOpenMode.Import);
-        return pdf.PageCount;
-    }
-
-    private static int GetPdfPageCount(string pdfPath)
-    {
-        using var pdf = PdfReader.Open(pdfPath, PdfDocumentOpenMode.Import);
-        return pdf.PageCount;
-    }
-
     private static void AssertValidPdf(byte[] pdfBytes)
     {
         Assert.NotNull(pdfBytes);
@@ -67,7 +51,7 @@ public class DocxConverterIntegrationTests : IDisposable
         var pdfBytes = Converters.DocxToPdfBytes(docx);
 
         AssertValidPdf(pdfBytes);
-        Assert.Equal(1, GetPdfPageCount(pdfBytes));
+        Assert.Equal(1, PdfProbe.PageCount(pdfBytes));
     }
 
     /// <summary>
@@ -78,7 +62,7 @@ public class DocxConverterIntegrationTests : IDisposable
     {
         var docx = BuildSimpleDocx("Test Content ABC");
         var pdfBytes = Converters.DocxToPdfBytes(docx);
-        var texts = ExtractTexts(pdfBytes);
+        var texts = PdfProbe.Texts(pdfBytes);
 
         // PDF may split text into separate word fragments
         Assert.Contains(texts, t => t.Content.Contains("Test"));
@@ -96,7 +80,7 @@ public class DocxConverterIntegrationTests : IDisposable
         var pdfBytes = Converters.DocxToPdfBytes(docx);
 
         AssertValidPdf(pdfBytes);
-        Assert.Equal(1, GetPdfPageCount(pdfBytes));
+        Assert.Equal(1, PdfProbe.PageCount(pdfBytes));
     }
 
     #endregion
@@ -112,7 +96,7 @@ public class DocxConverterIntegrationTests : IDisposable
     {
         var docx = BuildStyledDocx(bold: true, italic: false, fontSize: 24);
         var pdfBytes = Converters.DocxToPdfBytes(docx);
-        var texts = ExtractTexts(pdfBytes);
+        var texts = PdfProbe.Texts(pdfBytes);
 
         AssertValidPdf(pdfBytes);
         // PDF may split text into separate word fragments
@@ -156,7 +140,7 @@ public class DocxConverterIntegrationTests : IDisposable
     {
         var docx = BuildTableDocx(3, 3);
         var pdfBytes = Converters.DocxToPdfBytes(docx);
-        var texts = ExtractTexts(pdfBytes);
+        var texts = PdfProbe.Texts(pdfBytes);
 
         AssertValidPdf(pdfBytes);
         // Verify at least some cell content is present
@@ -172,7 +156,7 @@ public class DocxConverterIntegrationTests : IDisposable
     {
         var docx = BuildStyledTableDocx();
         var pdfBytes = Converters.DocxToPdfBytes(docx);
-        var texts = ExtractTexts(pdfBytes);
+        var texts = PdfProbe.Texts(pdfBytes);
 
         AssertValidPdf(pdfBytes);
         Assert.Contains(texts, t => t.Content.Contains("Header1"));
@@ -194,12 +178,10 @@ public class DocxConverterIntegrationTests : IDisposable
 
         AssertValidPdf(pdfBytes);
 
-        using var ms = new MemoryStream(pdfBytes);
-        var pdf = PdfReader.Open(ms, PdfDocumentOpenMode.Import);
-        var page = pdf.Pages[0];
+        var (width, height) = PdfProbe.PageSize(pdfBytes);
 
-        Assert.True(page.Width > page.Height,
-            $"Landscape page should be wider than tall: {page.Width:F0} × {page.Height:F0}");
+        Assert.True(width > height,
+            $"Landscape page should be wider than tall: {width:F0} × {height:F0}");
     }
 
     #endregion
@@ -217,7 +199,7 @@ public class DocxConverterIntegrationTests : IDisposable
         var pdfBytes = Converters.DocxToPdfBytes(docx);
 
         AssertValidPdf(pdfBytes);
-        var texts = ExtractTexts(pdfBytes);
+        var texts = PdfProbe.Texts(pdfBytes);
 
         // Table content and footer text should both be present
         Assert.Contains(texts, t => t.Content.Contains("Cell"));
@@ -262,9 +244,9 @@ public class DocxConverterIntegrationTests : IDisposable
         var pdfBytes = Converters.DocxToPdfBytes(docx);
 
         AssertValidPdf(pdfBytes);
-        Assert.Equal(1, GetPdfPageCount(pdfBytes));
+        Assert.Equal(1, PdfProbe.PageCount(pdfBytes));
 
-        var texts = ExtractTexts(pdfBytes);
+        var texts = PdfProbe.Texts(pdfBytes);
         Assert.Contains(texts, t => t.Content.Contains("Body"));
     }
 
@@ -282,12 +264,12 @@ public class DocxConverterIntegrationTests : IDisposable
 
         // Byte array overload
         var pdfFromBytes = Converters.DocxToPdfBytes(docx);
-        int countBytes = GetPdfPageCount(pdfFromBytes);
+        int countBytes = PdfProbe.PageCount(pdfFromBytes);
 
         // Stream overload
         using var stream = new MemoryStream(docx);
         var pdfFromStream = Converters.DocxToPdfBytes(stream);
-        int countStream = GetPdfPageCount(pdfFromStream);
+        int countStream = PdfProbe.PageCount(pdfFromStream);
 
         // File path overload
         var tempDocx = Path.GetTempFileName() + ".docx";
@@ -296,7 +278,7 @@ public class DocxConverterIntegrationTests : IDisposable
         {
             File.WriteAllBytes(tempDocx, docx);
             DocxConverter.DocxToPdf(tempDocx, tempPdf);
-            int countFile = GetPdfPageCount(tempPdf);
+            int countFile = PdfProbe.PageCount(tempPdf);
 
             Assert.Equal(countBytes, countStream);
             Assert.Equal(countBytes, countFile);
@@ -375,7 +357,7 @@ public class DocxConverterIntegrationTests : IDisposable
         Assert.True(File.Exists(output));
 
         var pdfBytes = File.ReadAllBytes(output);
-        var texts = ExtractTexts(pdfBytes);
+        var texts = PdfProbe.Texts(pdfBytes);
         var all = string.Join(" ", texts.Select(t => t.Content));
         Assert.Contains("DirectText", all);
         Assert.Contains("SdtWrappedText", all);
@@ -391,7 +373,7 @@ public class DocxConverterIntegrationTests : IDisposable
         Assert.True(File.Exists(output));
 
         var pdfBytes = File.ReadAllBytes(output);
-        var texts = ExtractTexts(pdfBytes);
+        var texts = PdfProbe.Texts(pdfBytes);
         var all = string.Join(" ", texts.Select(t => t.Content));
         Assert.Contains("Label", all);
         Assert.Contains("SdtCellValue", all);
@@ -407,7 +389,7 @@ public class DocxConverterIntegrationTests : IDisposable
         Assert.True(File.Exists(output));
 
         var pdfBytes = File.ReadAllBytes(output);
-        var texts = ExtractTexts(pdfBytes);
+        var texts = PdfProbe.Texts(pdfBytes);
         var all = string.Join(" ", texts.Select(t => t.Content));
         Assert.Contains("CellLabel", all);
         Assert.Contains("InlineSdtValue", all);
@@ -423,7 +405,7 @@ public class DocxConverterIntegrationTests : IDisposable
         Assert.True(File.Exists(output));
 
         var pdfBytes = File.ReadAllBytes(output);
-        var texts = ExtractTexts(pdfBytes);
+        var texts = PdfProbe.Texts(pdfBytes);
         var all = string.Join(" ", texts.Select(t => t.Content));
         Assert.Contains("BoldSdtText", all);
     }
@@ -439,7 +421,7 @@ public class DocxConverterIntegrationTests : IDisposable
         Assert.True(File.Exists(output));
 
         var pdfBytes = File.ReadAllBytes(output);
-        var texts = ExtractTexts(pdfBytes);
+        var texts = PdfProbe.Texts(pdfBytes);
         var all = string.Join(" ", texts.Select(t => t.Content));
         Assert.Contains("NotBold", all);
         Assert.Contains("StyledBold", all);
@@ -455,7 +437,7 @@ public class DocxConverterIntegrationTests : IDisposable
         Assert.True(File.Exists(output));
 
         var pdfBytes = File.ReadAllBytes(output);
-        var texts = ExtractTexts(pdfBytes);
+        var texts = PdfProbe.Texts(pdfBytes);
         var all = string.Join(" ", texts.Select(t => t.Content));
         Assert.Contains("NormalParagraph", all);
         Assert.Contains("SdtBlockParagraph", all);
@@ -1015,57 +997,4 @@ public class DocxConverterIntegrationTests : IDisposable
 
     #endregion
 
-    #region PDF Analysis Helpers
-
-    private record PdfText(double X, double Y, string Content);
-
-    private static List<PdfText> ExtractTexts(byte[] pdfBytes)
-    {
-        var texts = new List<PdfText>();
-        using var ms = new MemoryStream(pdfBytes);
-        var doc = PdfReader.Open(ms, PdfDocumentOpenMode.Import);
-        foreach (var page in doc.Pages)
-        {
-            var content = ContentReader.ReadContent(page);
-            double curX = 0, curY = 0;
-            WalkTexts(content, texts, ref curX, ref curY);
-        }
-        return texts;
-    }
-
-    private static void WalkTexts(CSequence seq, List<PdfText> texts, ref double curX, ref double curY)
-    {
-        foreach (var item in seq)
-        {
-            if (item is CSequence sub) { WalkTexts(sub, texts, ref curX, ref curY); continue; }
-            if (item is not COperator op) continue;
-
-            switch (op.OpCode.Name)
-            {
-                case "BT": curX = 0; curY = 0; break;
-                case "Tm" when op.Operands.Count == 6:
-                    curX = Val(op.Operands[4]); curY = Val(op.Operands[5]); break;
-                case "Td" when op.Operands.Count == 2:
-                    curX += Val(op.Operands[0]); curY += Val(op.Operands[1]); break;
-                case "Tj" or "TJ" when op.Operands.Count > 0:
-                    string txt = "";
-                    if (op.Operands[0] is CString s) txt = s.Value;
-                    else if (op.Operands[0] is CArray arr)
-                        foreach (var el in arr)
-                            if (el is CString cs) txt += cs.Value;
-                    if (!string.IsNullOrWhiteSpace(txt))
-                        texts.Add(new PdfText(curX, curY, txt.Trim()));
-                    break;
-            }
-        }
-    }
-
-    private static double Val(CObject o) => o switch
-    {
-        CReal r => r.Value,
-        CInteger ci => ci.Value,
-        _ => 0
-    };
-
-    #endregion
 }

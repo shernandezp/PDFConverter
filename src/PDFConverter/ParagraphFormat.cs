@@ -1,4 +1,4 @@
-using MigraDoc.DocumentObjectModel;
+using PDFConverter.Layout;
 
 namespace PDFConverter;
 
@@ -14,4 +14,9 @@ internal sealed record ParagraphFormat(
     bool HasExplicitSpacingBefore,
     bool HasExplicitSpacingAfter,
     bool PageBreakBefore = false,
-    string? ShadingColor = null);
+    string? ShadingColor = null,
+    BorderInfo? Borders = null,
+    bool? KeepNext = null,
+    bool? KeepLines = null,
+    bool? WidowControl = null,
+    bool Bidi = false);

@@ -1,5 +1,6 @@
 using DocumentFormat.OpenXml;
-using MigraDoc.DocumentObjectModel;
+using PDFConverter.Layout;
+using SkiaSharp;
 using W = DocumentFormat.OpenXml.Wordprocessing;
 
 namespace PDFConverter;
@@ -8,13 +9,10 @@ internal readonly record struct InlineOptions(
     double MaxImageWidthPoints = 0,
     Func<WordImage, bool>? SkipImage = null,
     bool ConditionalBold = false,
-    string? ConditionalColor = null,
-    double MaxTextWidthPoints = 0);
+    string? ConditionalColor = null);
 
 internal static class WordContentRenderer
 {
-    const string EmojiFontName = "Noto Emoji";
-
     public static bool Render(WordRenderContext ctx, OpenXmlElement container, W.Paragraph source,
         Paragraph target, InlineOptions options = default) =>
         RenderChildren(ctx, container, source, target, options, new FieldState());
@@ -40,7 +38,7 @@ internal static class WordContentRenderer
                     added |= RenderSimpleField(ctx, simpleField, source, target, options, fields);
                     break;
                 case W.BookmarkStart bookmark when !string.IsNullOrEmpty(bookmark.Name?.Value):
-                    target.AddBookmark(bookmark.Name!.Value!, false);
+                    target.Add(new BookmarkInline(bookmark.Name!.Value!));
                     break;
             }
         }
@@ -51,7 +49,6 @@ internal static class WordContentRenderer
         InlineOptions options, FieldState fields)
     {
         var format = ResolveFormat(ctx, run, source, options);
-        ctx.TrackFont(format.FontFamily);
 
         var added = false;
         foreach (var child in run.ChildElements)
@@ -64,25 +61,24 @@ internal static class WordContentRenderer
                 case W.FieldCode code:
                     fields.OnInstruction(code.Text);
                     break;
-                case W.Text text when !fields.SuppressResult && !string.IsNullOrEmpty(text.Text):
-                    AddText(target, Preserve(text, format.TransformText(text.Text), target),
-                        format, options.MaxTextWidthPoints);
+                case W.Text text when !fields.SuppressResult && !format.Hidden && !string.IsNullOrEmpty(text.Text):
+                    AddText(target, format.TransformText(text.Text), format);
                     added = true;
                     break;
-                case W.NoBreakHyphen when !fields.SuppressResult:
+                case W.NoBreakHyphen when !fields.SuppressResult && !format.Hidden:
                     AddText(target, "‑", format);
                     added = true;
                     break;
-                case W.SymbolChar symbol when !fields.SuppressResult:
+                case W.SymbolChar symbol when !fields.SuppressResult && !format.Hidden:
                     added |= AddSymbol(target, symbol, format);
                     break;
-                case W.Break brk:
+                case W.Break brk when !format.Hidden:
                     AddBreak(target, brk);
                     break;
-                case W.TabChar:
-                    target.AddTab();
+                case W.TabChar when !format.Hidden:
+                    target.Add(new TabInline());
                     break;
-                case W.Drawing:
+                case W.Drawing when !format.Hidden:
                     added |= RenderRunImages(ctx, run, target, options);
                     break;
             }
@@ -102,67 +98,8 @@ internal static class WordContentRenderer
         };
     }
 
-    const char NonBreakingSpace = (char)0x00A0;
-
-    // MigraDoc drops blanks at the start of a line, while Word keeps them when the run asks for
-    // whitespace to be preserved — which is how these templates indent a heading beside a logo.
-    static string Preserve(W.Text source, string text, Paragraph target)
-    {
-        if (source.Space?.Value != SpaceProcessingModeValues.Preserve) return text;
-        if (!text.Contains(' ')) return text;
-
-        var result = new System.Text.StringBuilder(text.Length);
-        var atLineStart = target.Elements.Count == 0;
-        var index = 0;
-
-        while (index < text.Length)
-        {
-            if (text[index] != ' ')
-            {
-                result.Append(text[index++]);
-                atLineStart = false;
-                continue;
-            }
-
-            var blanks = 0;
-            while (index < text.Length && text[index] == ' ') { blanks++; index++; }
-
-            if (!atLineStart)
-            {
-                result.Append(' ');
-                blanks--;
-            }
-            result.Append(NonBreakingSpace, blanks);
-            atLineStart = false;
-        }
-        return result.ToString();
-    }
-
-    static void AddText(Paragraph target, string text, RunFormat format, double maxWidthPoints = 0)
-    {
-        var lines = TextMeasure.SplitOverlongWords(text, format, maxWidthPoints);
-        for (var i = 0; i < lines.Count; i++)
-        {
-            if (i > 0) target.AddLineBreak();
-            AddSegments(target, lines[i], format);
-        }
-    }
-
-    static void AddSegments(Paragraph target, string text, RunFormat format)
-    {
-        if (!ConverterExtensions.ContainsEmoji(text))
-        {
-            format.ApplyTo(target.AddFormattedText(text));
-            return;
-        }
-
-        foreach (var (segment, isEmoji) in ConverterExtensions.SplitEmojiSegments(text))
-        {
-            var formatted = target.AddFormattedText(segment);
-            format.ApplyTo(formatted);
-            if (isEmoji) formatted.Font.Name = EmojiFontName;
-        }
-    }
+    static void AddText(Paragraph target, string text, RunFormat format, string? url = null) =>
+        target.Add(new TextRun(text, format.ToTextStyle(target.DefaultStyle), url));
 
     static bool AddSymbol(Paragraph target, W.SymbolChar symbol, RunFormat format)
     {
@@ -176,14 +113,12 @@ internal static class WordContentRenderer
         return true;
     }
 
-    // MigraDoc can only break before a paragraph, which covers Word's usual encoding of a manual
-    // page break: an otherwise empty paragraph holding a single w:br.
     static void AddBreak(Paragraph target, W.Break brk)
     {
-        if (brk.Type?.Value == W.BreakValues.Page && target.Elements.Count == 0)
-            target.Format.PageBreakBefore = true;
+        if (brk.Type?.Value == W.BreakValues.Page && target.IsEmpty)
+            target.PageBreakBefore = true;
         else
-            target.AddLineBreak();
+            target.Add(new LineBreakInline());
     }
 
     static bool RenderRunImages(WordRenderContext ctx, OpenXmlElement scope, Paragraph target, InlineOptions options)
@@ -200,41 +135,25 @@ internal static class WordContentRenderer
     public static bool AddImage(WordRenderContext ctx, WordImage info, Paragraph target,
         double maxWidthPoints, string? hyperlinkUrl)
     {
-        var path = ctx.MaterializeImage(info);
-        if (path == null) return false;
+        var image = ctx.MaterializeImage(info);
+        if (image == null) return false;
 
-        try
-        {
-            var image = target.AddImage(path);
-            var width = maxWidthPoints > 0 ? Math.Min(info.WidthPoints, maxWidthPoints) : info.WidthPoints;
-            var height = info.HeightPoints * (width / Math.Max(info.WidthPoints, 0.01));
-            SetSize(image, info, width, height);
-
-            ctx.TrackHyperlinkedImage(hyperlinkUrl, width, height);
-            return true;
-        }
-        catch (Exception ex)
-        {
-            OpenXmlHelpers.ImageLoadLogger?.Invoke($"Failed adding image '{path}': {ex.Message}");
-            return false;
-        }
+        var width = maxWidthPoints > 0 ? Math.Min(info.WidthPoints, maxWidthPoints) : info.WidthPoints;
+        target.Add(new InlineImage(image, width, ScaledHeight(info, width), hyperlinkUrl));
+        return true;
     }
 
     // Word stretches a picture to the extent stored in the drawing, which need not match the
-    // file's own aspect ratio; letting MigraDoc derive the height distorts such pictures.
-    public static void SetSize(MigraDoc.DocumentObjectModel.Shapes.Image image,
-        WordImage info, double widthPoints, double heightPoints)
-    {
-        var hasBothExtents = info.ExtentCxEmu.HasValue && info.ExtentCyEmu.HasValue;
-        image.LockAspectRatio = !hasBothExtents;
-        image.Width = Unit.FromPoint(widthPoints);
-        if (hasBothExtents) image.Height = Unit.FromPoint(heightPoints);
-    }
+    // file's own aspect ratio; only without both extents is the file's ratio authoritative.
+    public static double? ScaledHeight(WordImage info, double width) =>
+        info.ExtentCxEmu.HasValue && info.ExtentCyEmu.HasValue
+            ? info.HeightPoints * (width / Math.Max(info.WidthPoints, 0.01))
+            : null;
 
     static bool RenderHyperlink(WordRenderContext ctx, W.Hyperlink hyperlink, W.Paragraph source,
         Paragraph target, InlineOptions options, FieldState fields)
     {
-        var (destination, type) = ResolveDestination(ctx, hyperlink);
+        var destination = ResolveDestination(ctx, hyperlink);
         if (destination == null)
             return RenderChildren(ctx, hyperlink, source, target, options, fields);
 
@@ -249,22 +168,18 @@ internal static class WordContentRenderer
             }
 
             var format = ResolveFormat(ctx, run, source, options);
-            ctx.TrackFont(format.FontFamily);
-
             var text = run.InnerText;
             if (string.IsNullOrEmpty(text)) continue;
 
-            var link = target.AddHyperlink(destination, type);
-            var formatted = link.AddFormattedText(format.TransformText(text));
-            format.ApplyTo(formatted);
-            if (format.Color == null) formatted.Color = Colors.Blue;
-            formatted.Underline = Underline.Single;
+            var style = format.ToTextStyle(target.DefaultStyle) with { Underline = UnderlineStyle.Single };
+            if (format.Color == null) style = style with { Color = SKColors.Blue };
+            target.Add(new TextRun(format.TransformText(text), style, destination));
             added = true;
         }
         return added;
     }
 
-    static (string? Destination, HyperlinkType Type) ResolveDestination(WordRenderContext ctx, W.Hyperlink hyperlink)
+    static string? ResolveDestination(WordRenderContext ctx, W.Hyperlink hyperlink)
     {
         var relationshipId = hyperlink.Id?.Value;
         if (!string.IsNullOrEmpty(relationshipId))
@@ -273,7 +188,7 @@ internal static class WordContentRenderer
             try
             {
                 var uri = owner.HyperlinkRelationships.FirstOrDefault(r => r.Id == relationshipId)?.Uri?.ToString();
-                if (!string.IsNullOrEmpty(uri)) return (uri, HyperlinkType.Web);
+                if (!string.IsNullOrEmpty(uri)) return uri;
             }
             catch (Exception ex)
             {
@@ -283,7 +198,7 @@ internal static class WordContentRenderer
         }
 
         var anchor = hyperlink.Anchor?.Value;
-        return string.IsNullOrEmpty(anchor) ? (null, HyperlinkType.Web) : (anchor, HyperlinkType.Bookmark);
+        return string.IsNullOrEmpty(anchor) ? null : "#" + anchor;
     }
 
     static bool RenderSimpleField(WordRenderContext ctx, W.SimpleField field, W.Paragraph source,
@@ -352,10 +267,8 @@ internal static class WordContentRenderer
                 .FirstOrDefault()?.ToUpperInvariant();
             if (keyword is not ("PAGE" or "NUMPAGES")) return false;
 
-            var container = target.AddFormattedText();
-            format?.ApplyTo(container);
-            if (keyword == "PAGE") container.AddPageField();
-            else container.AddNumPagesField();
+            var style = format?.ToTextStyle(target.DefaultStyle) ?? target.DefaultStyle;
+            target.Add(new FieldRun(keyword == "PAGE" ? FieldKind.Page : FieldKind.NumPages, style));
             return true;
         }
     }

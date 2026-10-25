@@ -21,7 +21,11 @@ internal sealed record WordImage(
     string? HyperlinkUrl = null,
     string? HorizontalRelativeFrom = null,
     string? VerticalRelativeFrom = null,
-    string? WrapKind = null)
+    string? WrapKind = null,
+    double DistanceTop = 0,
+    double DistanceBottom = 0,
+    double DistanceLeft = 0,
+    double DistanceRight = 0)
 {
     public double WidthPoints => ExtentCxEmu.HasValue
         ? Units.EmuToPoints(ExtentCxEmu.Value) : LayoutDefaults.ImageSizePoints;
@@ -120,7 +124,8 @@ internal static class WordImageExtractor
         return new WordImage(bytes, cx, cy,
             Attribute(wrap, "wrapText"), isBackground, isAnchor, offsetX, offsetY,
             cropLeft, cropTop, cropRight, cropBottom,
-            ReadHyperlink(owner, frame), horizontalRelativeFrom, verticalRelativeFrom, wrap?.LocalName);
+            ReadHyperlink(owner, frame), horizontalRelativeFrom, verticalRelativeFrom, wrap?.LocalName,
+            Distance(frame, "distT"), Distance(frame, "distB"), Distance(frame, "distL"), Distance(frame, "distR"));
     }
 
     // A shape inside a group is placed in the group's own coordinate space; each enclosing group
@@ -206,6 +211,9 @@ internal static class WordImageExtractor
             return null;
         }
     }
+
+    static double Distance(OpenXmlElement frame, string attribute) =>
+        ParseLong(Attribute(frame, attribute)) is { } emu ? Units.EmuToPoints(emu) : 0;
 
     static bool IsInsideGroupShape(OpenXmlElement element) =>
         element.Ancestors().Any(a => a.LocalName is "wgp" or "wGrp" or "grpSp");

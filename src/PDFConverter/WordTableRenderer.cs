@@ -1,5 +1,5 @@
-using MigraDoc.DocumentObjectModel;
-using MigraDoc.DocumentObjectModel.Tables;
+using PDFConverter.Layout;
+using SkiaSharp;
 using W = DocumentFormat.OpenXml.Wordprocessing;
 
 namespace PDFConverter;
@@ -8,36 +8,46 @@ internal static class WordTableRenderer
 {
     public static void RenderTable(WordRenderContext ctx, Section section, W.Table table)
     {
+        var built = Build(ctx, table, section.ContentWidth, topLevel: true);
+        if (built != null) section.Blocks.Add(built);
+    }
+
+    public static void RenderNestedTable(WordRenderContext ctx, W.Table table, TableCell parentCell, double parentWidth)
+    {
+        var built = Build(ctx, table, parentWidth, topLevel: false);
+        if (built != null) parentCell.Blocks.Add(built);
+    }
+
+    static Table? Build(WordRenderContext ctx, W.Table table, double availableWidth, bool topLevel)
+    {
         var rows = table.Elements<W.TableRow>().ToList();
-        if (rows.Count == 0) return;
+        if (rows.Count == 0) return null;
 
-        var contentWidth = section.PageSetup.PageWidth.Point
-            - section.PageSetup.LeftMargin.Point - section.PageSetup.RightMargin.Point;
-
-        var layout = TableLayout.Measure(table, rows, contentWidth);
-        var migTable = section.AddTable();
-        foreach (var width in layout.ScaledWidths)
-            migTable.AddColumn(Unit.FromPoint(width));
+        var layout = TableLayout.Measure(table, rows, availableWidth);
+        var target = new Table();
+        target.ColumnWidths.AddRange(layout.ScaledWidths);
 
         var tblPr = table.GetFirstChild<W.TableProperties>();
-        ApplyTableBorders(migTable, WordHelpers.ResolveTableBorders(ctx.MainPart, tblPr));
-        var margins = ApplyCellMargins(migTable, ctx, tblPr);
-        ApplyTableIndent(migTable, tblPr, layout, contentWidth);
+        ApplyTableBorders(target, WordHelpers.ResolveTableBorders(ctx.MainPart, tblPr));
+        var margins = ApplyCellMargins(target, ctx, tblPr);
+        if (topLevel) ApplyTableIndent(target, tblPr, layout, availableWidth);
 
-        var firstRowStyle = WordHelpers.GetTableStyleConditionalFormatting(
-            ctx.MainPart, tblPr, W.TableStyleOverrideValues.FirstRow);
-        var firstColumnStyle = WordHelpers.GetTableStyleConditionalFormatting(
-            ctx.MainPart, tblPr, W.TableStyleOverrideValues.FirstColumn);
+        var firstRowStyle = topLevel
+            ? WordHelpers.GetTableStyleConditionalFormatting(ctx.MainPart, tblPr, W.TableStyleOverrideValues.FirstRow)
+            : null;
+        var firstColumnStyle = topLevel
+            ? WordHelpers.GetTableStyleConditionalFormatting(ctx.MainPart, tblPr, W.TableStyleOverrideValues.FirstColumn)
+            : null;
 
         var verticalSpans = MeasureVerticalMerges(rows, layout.ColumnCount);
 
         for (var rowIndex = 0; rowIndex < rows.Count; rowIndex++)
         {
             var sourceRow = rows[rowIndex];
-            var row = migTable.AddRow();
+            var row = target.AddRow();
             ApplyRowProperties(row, sourceRow);
 
-            var isFirstRow = WordHelpers.IsConditionalRow(
+            var isFirstRow = topLevel && WordHelpers.IsConditionalRow(
                 sourceRow, tblPr, rowIndex, rows.Count, W.TableStyleOverrideValues.FirstRow);
 
             var column = 0;
@@ -55,22 +65,19 @@ internal static class WordTableRenderer
                     continue;
                 }
 
-                var cell = row.Cells[column];
+                var cell = row.Cell(column);
                 var conditionalStyle = isFirstRow ? firstRowStyle : column == 0 ? firstColumnStyle : null;
 
                 ApplyShading(cell, tcPr, conditionalStyle);
                 var borders = WordHelpers.GetWordCellBorders(tcPr, tblPr);
                 ApplyCellBorders(cell, borders);
-                ApplyCellPadding(cell, borders);
+                if (borders.PaddingTop > 0) cell.ExtraPaddingTop = borders.PaddingTop;
+                if (borders.PaddingBottom > 0) cell.ExtraPaddingBottom = borders.PaddingBottom;
                 ApplyVerticalAlignment(cell, tcPr);
 
-                if (gridSpan > 1)
-                {
-                    var mergeRight = Math.Min(gridSpan - 1, layout.ColumnCount - column - 1);
-                    if (mergeRight > 0) cell.MergeRight = mergeRight;
-                }
+                cell.ColumnSpan = Math.Max(1, Math.Min(gridSpan, layout.ColumnCount - column));
                 if (verticalSpans.TryGetValue((rowIndex, column), out var mergeDown) && mergeDown > 0)
-                    cell.MergeDown = mergeDown;
+                    cell.RowSpan = mergeDown + 1;
 
                 var textWidth = layout.WidthOf(column, gridSpan) - margins.Left - margins.Right;
                 RenderCellContent(ctx, cell, sourceCell, textWidth, conditionalStyle);
@@ -79,6 +86,8 @@ internal static class WordTableRenderer
 
             if (column == 0) RenderDrawingMlRow(ctx, sourceRow, row, layout.ColumnCount);
         }
+
+        return target;
     }
 
     const string DrawingMlNamespace = "http://schemas.openxmlformats.org/drawingml/2006/main";
@@ -86,7 +95,7 @@ internal static class WordTableRenderer
 
     // Word occasionally emits DrawingML cells (a:tc) inside an ordinary w:tr; they carry text and
     // hyperlinks but none of the WordprocessingML cell structure.
-    static void RenderDrawingMlRow(WordRenderContext ctx, W.TableRow sourceRow, Row row, int columnCount)
+    static void RenderDrawingMlRow(WordRenderContext ctx, W.TableRow sourceRow, TableRow row, int columnCount)
     {
         var column = 0;
         foreach (var sourceCell in sourceRow.ChildElements)
@@ -94,7 +103,7 @@ internal static class WordTableRenderer
             if (sourceCell.LocalName != "tc" || sourceCell.NamespaceUri != DrawingMlNamespace) continue;
             if (column >= columnCount) break;
 
-            var target = row.Cells[column].AddParagraph();
+            var target = ctx.Prepare(row.Cell(column).AddParagraph());
             foreach (var paragraph in sourceCell.ChildElements.Where(c => c.LocalName == "p"))
             {
                 foreach (var child in paragraph.ChildElements)
@@ -102,7 +111,7 @@ internal static class WordTableRenderer
                     if (child.LocalName == "hyperlink" && child.NamespaceUri == WordprocessingMlNamespace)
                         AddDrawingMlHyperlink(ctx, child, target);
                     else if (child.LocalName == "r" && child.NamespaceUri == DrawingMlNamespace)
-                        target.AddText(DrawingMlText(child));
+                        target.Add(new TextRun(DrawingMlText(child), target.DefaultStyle));
                 }
             }
             column++;
@@ -132,49 +141,12 @@ internal static class WordTableRenderer
         if (string.IsNullOrEmpty(text)) text = url ?? string.Empty;
         if (string.IsNullOrEmpty(text)) return;
 
-        var formatted = url == null
-            ? target.AddFormattedText(text)
-            : target.AddHyperlink(url, HyperlinkType.Web).AddFormattedText(text);
-        formatted.Color = Colors.Blue;
-        formatted.Underline = Underline.Single;
+        var style = target.DefaultStyle with { Color = SKColors.Blue, Underline = UnderlineStyle.Single };
+        target.Add(new TextRun(text, style, url));
     }
 
     static string DrawingMlText(DocumentFormat.OpenXml.OpenXmlElement source) =>
         string.Concat(source.Descendants().Where(d => d.LocalName == "t").Select(d => d.InnerText));
-
-    public static void RenderNestedTable(WordRenderContext ctx, W.Table table, Cell parentCell)
-    {
-        var rows = table.Elements<W.TableRow>().ToList();
-        if (rows.Count == 0) return;
-
-        var parentWidth = parentCell.Column?.Width.Point ?? 0;
-        var layout = TableLayout.Measure(table, rows, parentWidth);
-
-        var nested = new Table();
-        foreach (var width in layout.ScaledWidths)
-            nested.AddColumn(Unit.FromPoint(width));
-
-        var tblPr = table.GetFirstChild<W.TableProperties>();
-        ApplyTableBorders(nested, WordHelpers.ResolveTableBorders(ctx.MainPart, tblPr));
-        var margins = ApplyCellMargins(nested, ctx, tblPr);
-
-        foreach (var sourceRow in rows)
-        {
-            var row = nested.AddRow();
-            var column = 0;
-            foreach (var sourceCell in sourceRow.Elements<W.TableCell>())
-            {
-                if (column >= layout.ColumnCount) break;
-                var tcPr = sourceCell.GetFirstChild<W.TableCellProperties>();
-                ApplyShading(row.Cells[column], tcPr, null);
-                RenderCellContent(ctx, row.Cells[column], sourceCell,
-                    layout.WidthOf(column, 1) - margins.Left - margins.Right, null);
-                column += (int)(tcPr?.GetFirstChild<W.GridSpan>()?.Val?.Value ?? 1);
-            }
-        }
-
-        parentCell.Elements.Add(nested);
-    }
 
     sealed class TableLayout
     {
@@ -274,7 +246,7 @@ internal static class WordTableRenderer
         return null;
     }
 
-    static void RenderCellContent(WordRenderContext ctx, Cell cell, W.TableCell sourceCell,
+    static void RenderCellContent(WordRenderContext ctx, TableCell cell, W.TableCell sourceCell,
         double cellWidth, W.TableStyleProperties? conditionalStyle)
     {
         var conditionalRun = conditionalStyle?.RunPropertiesBaseStyle;
@@ -282,8 +254,7 @@ internal static class WordTableRenderer
             MaxImageWidthPoints: cellWidth * 0.9,
             ConditionalBold: conditionalRun?.Bold != null
                 && (conditionalRun.Bold.Val == null || conditionalRun.Bold.Val.Value),
-            ConditionalColor: conditionalRun?.Color?.Val?.Value,
-            MaxTextWidthPoints: cellWidth);
+            ConditionalColor: conditionalRun?.Color?.Val?.Value);
 
         var paragraphs = new List<W.Paragraph>();
         foreach (var child in sourceCell.ChildElements)
@@ -295,43 +266,45 @@ internal static class WordTableRenderer
 
         if (paragraphs.Count == 0)
         {
-            cell.AddParagraph();
+            ctx.Prepare(cell.AddParagraph());
             return;
         }
 
-        for (var i = 0; i < paragraphs.Count; i++)
+        foreach (var source in paragraphs)
         {
-            var source = paragraphs[i];
-            var target = cell.AddParagraph();
+            var target = ctx.Prepare(cell.AddParagraph());
             var format = WordHelpers.GetParagraphFormatting(source.ParagraphProperties);
 
-            target.Format.Alignment = format.Alignment;
-            if (format.LeftIndent > 0) target.Format.LeftIndent = Unit.FromPoint(format.LeftIndent);
-            if (format.FirstLineIndent != 0) target.Format.FirstLineIndent = Unit.FromPoint(format.FirstLineIndent);
+            target.Alignment = format.Bidi ? WordDocumentBuilder.MirrorForRightToLeft(format.Alignment) : format.Alignment;
+            target.RightToLeft = format.Bidi;
+            if (format.LeftIndent > 0) target.LeftIndent = format.LeftIndent;
+            if (format.RightIndent > 0) target.RightIndent = format.RightIndent;
+            if (format.FirstLineIndent != 0) target.FirstLineIndent = format.FirstLineIndent;
             if (format.SpacingBefore > 0)
-                target.Format.SpaceBefore = Unit.FromPoint(
-                    Math.Min(format.SpacingBefore, LayoutDefaults.TableCellSpacingCapPoints));
+                target.SpaceBefore = Math.Min(format.SpacingBefore, LayoutDefaults.TableCellSpacingCapPoints);
             if (format.SpacingAfter > 0)
-                target.Format.SpaceAfter = Unit.FromPoint(
-                    Math.Min(format.SpacingAfter, LayoutDefaults.TableCellSpacingCapPoints));
+                target.SpaceAfter = Math.Min(format.SpacingAfter, LayoutDefaults.TableCellSpacingCapPoints);
 
-            var added = WordContentRenderer.Render(ctx, source, source, target, options);
-            if (!added && i > 0) target.AddText(" ");
+            WordContentRenderer.Render(ctx, source, source, target, options);
         }
     }
 
-    static void ApplyRowProperties(Row row, W.TableRow sourceRow)
+    static void ApplyRowProperties(TableRow row, W.TableRow sourceRow)
     {
         var rowProperties = sourceRow.GetFirstChild<W.TableRowProperties>();
         if (rowProperties == null) return;
 
-        var height = rowProperties.GetFirstChild<W.TableRowHeight>()?.Val;
-        if (height is { HasValue: true }) row.Height = Unit.FromPoint(Units.TwipsToPoints(height.Value));
+        var rowHeight = rowProperties.GetFirstChild<W.TableRowHeight>();
+        if (rowHeight?.Val is { HasValue: true } height)
+        {
+            row.MinHeight = Units.TwipsToPoints(height.Value);
+            row.ExactHeight = rowHeight.HeightType?.Value == W.HeightRuleValues.Exact;
+        }
 
-        if (rowProperties.GetFirstChild<W.TableHeader>() != null) row.HeadingFormat = true;
+        if (rowProperties.GetFirstChild<W.TableHeader>() != null) row.IsHeader = true;
     }
 
-    static void ApplyShading(Cell cell, W.TableCellProperties? tcPr, W.TableStyleProperties? conditionalStyle)
+    static void ApplyShading(TableCell cell, W.TableCellProperties? tcPr, W.TableStyleProperties? conditionalStyle)
     {
         var fill = tcPr?.GetFirstChild<W.Shading>()?.Fill?.Value;
         if (!ColorUtils.TryParse(fill, out var color))
@@ -340,16 +313,10 @@ internal static class WordTableRenderer
                 ?.GetFirstChild<W.Shading>()?.Fill?.Value;
             if (!ColorUtils.TryParse(conditionalFill, out color)) return;
         }
-        cell.Shading.Color = color;
+        cell.Shading = color;
     }
 
-    static void ApplyCellPadding(Cell cell, BorderInfo borders)
-    {
-        if (borders.PaddingTop > 0) cell.Format.SpaceBefore = Unit.FromPoint(borders.PaddingTop);
-        if (borders.PaddingBottom > 0) cell.Format.SpaceAfter = Unit.FromPoint(borders.PaddingBottom);
-    }
-
-    static void ApplyVerticalAlignment(Cell cell, W.TableCellProperties? tcPr)
+    static void ApplyVerticalAlignment(TableCell cell, W.TableCellProperties? tcPr)
     {
         var alignment = tcPr?.GetFirstChild<W.TableCellVerticalAlignment>()?.Val?.Value;
         if (alignment == null) return;
@@ -359,17 +326,17 @@ internal static class WordTableRenderer
             VerticalAlignment.Top;
     }
 
-    static WordHelpers.CellMargins ApplyCellMargins(Table migTable, WordRenderContext ctx, W.TableProperties? tblPr)
+    static WordHelpers.CellMargins ApplyCellMargins(Table table, WordRenderContext ctx, W.TableProperties? tblPr)
     {
         var margins = WordHelpers.GetTableCellMargins(ctx.MainPart, tblPr);
-        migTable.LeftPadding = Unit.FromPoint(margins.Left);
-        migTable.RightPadding = Unit.FromPoint(margins.Right);
-        migTable.TopPadding = Unit.FromPoint(margins.Top);
-        migTable.BottomPadding = Unit.FromPoint(margins.Bottom);
+        table.PaddingLeft = margins.Left;
+        table.PaddingRight = margins.Right;
+        table.PaddingTop = margins.Top;
+        table.PaddingBottom = margins.Bottom;
         return margins;
     }
 
-    static void ApplyTableIndent(Table migTable, W.TableProperties? tblPr, TableLayout layout, double contentWidth)
+    static void ApplyTableIndent(Table table, W.TableProperties? tblPr, TableLayout layout, double contentWidth)
     {
         var indent = Units.TwipsToPoints(tblPr?.TableIndentation?.Width?.Value ?? 0);
         var justification = tblPr?.TableJustification?.Val?.Value;
@@ -381,70 +348,67 @@ internal static class WordTableRenderer
             else if (justification == W.TableRowAlignmentValues.Right) indent = slack;
         }
 
-        if (indent > 0) migTable.Rows.LeftIndent = Unit.FromPoint(indent);
+        if (indent > 0) table.LeftIndent = indent;
     }
 
-    static void ApplyTableBorders(Table migTable, W.TableBorders? borders)
+    static void ApplyTableBorders(Table table, W.TableBorders? borders)
     {
+        var defaults = table.DefaultBorders;
         if (borders == null)
         {
-            migTable.Borders.Width = Unit.FromPoint(LayoutDefaults.BorderWidthPoints);
-            migTable.Borders.Color = Colors.Black;
+            defaults.SetAll(new BorderEdge(LayoutDefaults.BorderWidthPoints, SKColors.Black));
             return;
         }
 
-        ApplyBorderEdge(migTable.Borders.Top, borders.TopBorder);
-        ApplyBorderEdge(migTable.Borders.Bottom, borders.BottomBorder);
-        ApplyBorderEdge(migTable.Borders.Left, borders.LeftBorder);
-        ApplyBorderEdge(migTable.Borders.Right, borders.RightBorder);
+        defaults.Top = Edge(borders.TopBorder);
+        defaults.Bottom = Edge(borders.BottomBorder);
+        defaults.Left = Edge(borders.LeftBorder);
+        defaults.Right = Edge(borders.RightBorder);
 
-        ApplyInsideBorder(migTable.Borders.Top, migTable.Borders.Bottom, borders.InsideHorizontalBorder);
-        ApplyInsideBorder(migTable.Borders.Left, migTable.Borders.Right, borders.InsideVerticalBorder);
+        var insideH = Edge(borders.InsideHorizontalBorder);
+        if (insideH is { IsVisible: true })
+        {
+            defaults.Top ??= insideH;
+            defaults.Bottom ??= insideH;
+            if (!defaults.Top.Value.IsVisible) defaults.Top = insideH;
+            if (!defaults.Bottom.Value.IsVisible) defaults.Bottom = insideH;
+        }
+
+        var insideV = Edge(borders.InsideVerticalBorder);
+        if (insideV is { IsVisible: true })
+        {
+            defaults.Left ??= insideV;
+            defaults.Right ??= insideV;
+            if (!defaults.Left.Value.IsVisible) defaults.Left = insideV;
+            if (!defaults.Right.Value.IsVisible) defaults.Right = insideV;
+        }
     }
 
-    static void ApplyInsideBorder(Border first, Border second, W.BorderType? source)
+    static BorderEdge? Edge(W.BorderType? source)
     {
-        if (source?.Val == null || source.Val.Value == W.BorderValues.None) return;
+        if (source == null) return null;
+        if (source.Val?.Value == W.BorderValues.None || source.Val?.Value == W.BorderValues.Nil)
+            return BorderEdge.None;
 
         var width = source.Size is { HasValue: true } size
             ? Units.EighthPointsToPoints(size.Value)
             : LayoutDefaults.BorderWidthPoints;
-
-        foreach (var border in new[] { first, second })
-        {
-            if (border.Width.Point != 0) continue;
-            border.Width = Unit.FromPoint(width);
-            border.Color = ColorUtils.TryParse(source.Color?.Value, out var color) ? color : Colors.Black;
-        }
+        return new BorderEdge(width, ColorUtils.TryParse(source.Color?.Value, out var color) ? color : SKColors.Black,
+            BorderPatterns.From(source.Val?.InnerText));
     }
 
-    static void ApplyBorderEdge(Border border, W.BorderType? source)
+    static void ApplyCellBorders(TableCell cell, BorderInfo borders)
     {
-        if (source == null) return;
-        if (source.Val?.Value == W.BorderValues.None || source.Val?.Value == W.BorderValues.Nil)
-        {
-            border.Width = 0;
-            return;
-        }
-
-        border.Width = Unit.FromPoint(source.Size is { HasValue: true } size
-            ? Units.EighthPointsToPoints(size.Value)
-            : LayoutDefaults.BorderWidthPoints);
-        border.Color = ColorUtils.TryParse(source.Color?.Value, out var color) ? color : Colors.Black;
+        cell.Borders.Top = Edge(borders.TopWidth, borders.TopColor, borders.TopStyle);
+        cell.Borders.Bottom = Edge(borders.BottomWidth, borders.BottomColor, borders.BottomStyle);
+        cell.Borders.Left = Edge(borders.LeftWidth, borders.LeftColor, borders.LeftStyle);
+        cell.Borders.Right = Edge(borders.RightWidth, borders.RightColor, borders.RightStyle);
     }
 
-    static void ApplyCellBorders(Cell cell, BorderInfo borders)
+    static BorderEdge? Edge(double width, string? colorValue, string? style)
     {
-        ApplyEdge(cell.Borders.Top, borders.TopWidth, borders.TopColor);
-        ApplyEdge(cell.Borders.Bottom, borders.BottomWidth, borders.BottomColor);
-        ApplyEdge(cell.Borders.Left, borders.LeftWidth, borders.LeftColor);
-        ApplyEdge(cell.Borders.Right, borders.RightWidth, borders.RightColor);
-    }
-
-    static void ApplyEdge(Border border, double width, string? colorValue)
-    {
-        if (width <= 0) return;
-        border.Width = Unit.FromPoint(width);
-        border.Color = ColorUtils.TryParse(colorValue, out var color) ? color : Colors.Black;
+        if (width <= 0) return style is "nil" or "none" ? BorderEdge.None : null;
+        return new BorderEdge(width, ColorUtils.TryParse(colorValue, out var color) ? color : SKColors.Black,
+            BorderPatterns.From(style));
     }
 }

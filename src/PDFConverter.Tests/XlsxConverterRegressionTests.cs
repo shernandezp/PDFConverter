@@ -1,7 +1,6 @@
 using DocumentFormat.OpenXml;
 using DocumentFormat.OpenXml.Packaging;
 using DocumentFormat.OpenXml.Spreadsheet;
-using PdfSharp.Pdf.IO;
 using Xunit;
 
 namespace PDFConverter.Tests;
@@ -11,40 +10,28 @@ public class XlsxConverterRegressionTests
     [Fact]
     public void XlsxToPdfBytes_LandscapeSheet_ProducesALandscapePage()
     {
-        using var ms = new MemoryStream(Converters.XlsxToPdfBytes(BuildSheet(landscape: true)));
-        using var pdf = PdfReader.Open(ms, PdfDocumentOpenMode.Import);
-
-        var page = pdf.Pages[0];
-        Assert.True(page.Width.Point > page.Height.Point,
-            $"expected a landscape page, got {page.Width.Point}x{page.Height.Point}");
+        var (width, height) = PdfProbe.PageSize(Converters.XlsxToPdfBytes(BuildSheet(landscape: true)));
+        Assert.True(width > height,
+            $"expected a landscape page, got {width}x{height}");
     }
 
     [Fact]
     public void XlsxToPdfBytes_PortraitSheet_ProducesAPortraitPage()
     {
-        using var ms = new MemoryStream(Converters.XlsxToPdfBytes(BuildSheet(landscape: false)));
-        using var pdf = PdfReader.Open(ms, PdfDocumentOpenMode.Import);
-
-        var page = pdf.Pages[0];
-        Assert.True(page.Height.Point > page.Width.Point);
+        var (width, height) = PdfProbe.PageSize(Converters.XlsxToPdfBytes(BuildSheet(landscape: false)));
+        Assert.True(height > width);
     }
 
     [Fact]
     public void XlsxToPdfBytes_HiddenSheet_IsNotRendered()
     {
-        using var ms = new MemoryStream(Converters.XlsxToPdfBytes(BuildTwoSheetWorkbook(secondHidden: true)));
-        using var pdf = PdfReader.Open(ms, PdfDocumentOpenMode.Import);
-
-        Assert.Equal(1, pdf.PageCount);
+        Assert.Equal(1, PdfProbe.PageCount(Converters.XlsxToPdfBytes(BuildTwoSheetWorkbook(secondHidden: true))));
     }
 
     [Fact]
     public void XlsxToPdfBytes_VisibleSheets_AreBothRendered()
     {
-        using var ms = new MemoryStream(Converters.XlsxToPdfBytes(BuildTwoSheetWorkbook(secondHidden: false)));
-        using var pdf = PdfReader.Open(ms, PdfDocumentOpenMode.Import);
-
-        Assert.Equal(2, pdf.PageCount);
+        Assert.Equal(2, PdfProbe.PageCount(Converters.XlsxToPdfBytes(BuildTwoSheetWorkbook(secondHidden: false))));
     }
 
     [Theory]
@@ -76,32 +63,7 @@ public class XlsxConverterRegressionTests
         return ms.ToArray();
     }
 
-    static List<string> ExtractTexts(byte[] pdfBytes)
-    {
-        var texts = new List<string>();
-        using var ms = new MemoryStream(pdfBytes);
-        using var pdf = PdfReader.Open(ms, PdfDocumentOpenMode.Import);
-        foreach (var page in pdf.Pages) Walk(PdfSharp.Pdf.Content.ContentReader.ReadContent(page), texts);
-        return texts;
-    }
-
-    static void Walk(PdfSharp.Pdf.Content.Objects.CSequence sequence, List<string> texts)
-    {
-        foreach (var item in sequence)
-        {
-            if (item is PdfSharp.Pdf.Content.Objects.CSequence nested) { Walk(nested, texts); continue; }
-            if (item is not PdfSharp.Pdf.Content.Objects.COperator op) continue;
-            if (op.OpCode.Name is not ("Tj" or "TJ") || op.Operands.Count == 0) continue;
-
-            var text = string.Empty;
-            if (op.Operands[0] is PdfSharp.Pdf.Content.Objects.CString s) text = s.Value;
-            else if (op.Operands[0] is PdfSharp.Pdf.Content.Objects.CArray array)
-                foreach (var element in array)
-                    if (element is PdfSharp.Pdf.Content.Objects.CString cs) text += cs.Value;
-
-            if (!string.IsNullOrWhiteSpace(text)) texts.Add(text.Trim());
-        }
-    }
+    static List<string> ExtractTexts(byte[] pdfBytes) => PdfProbe.Words(pdfBytes);
 
     static byte[] BuildSheet(bool landscape)
     {

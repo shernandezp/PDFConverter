@@ -1,6 +1,6 @@
 using Xunit;
 using W = DocumentFormat.OpenXml.Wordprocessing;
-using MigraDoc.DocumentObjectModel;
+using PDFConverter.Layout;
 
 namespace PDFConverter.Tests;
 

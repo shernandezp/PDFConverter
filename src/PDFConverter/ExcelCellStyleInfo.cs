@@ -10,7 +10,8 @@ internal sealed record ExcelCellStyleInfo(
     double? FontSize,
     string? FontColor,
     bool Bold,
-    bool Italic)
+    bool Italic,
+    bool WrapText = false)
 {
     public static ExcelCellStyleInfo Empty { get; } = new(null, null, null, null, BorderInfo.Empty, null, null, null, false, false);
 }
